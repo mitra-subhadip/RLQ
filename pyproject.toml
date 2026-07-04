@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-qtranspiler"
+version = "0.1.0"
+description = "Graph-DQN initial qubit placement for calibration-aware routing"
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "qiskit>=2.0,<3",
+    "torch>=2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
