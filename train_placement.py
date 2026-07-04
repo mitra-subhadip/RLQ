@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Train the graph DQN on generated placement problems."""
+
+from __future__ import annotations
+
+import argparse
+import random
+from pathlib import Path
+
+import networkx as nx
+import numpy as np
+import torch
+
+from rl_qtranspiler.curriculum import Curriculum, supervised_warm_start
+from rl_qtranspiler.generators import SUPPORTED_FAMILIES, generate_circuit
+from rl_qtranspiler.hardware import load_ibm_boston
+from rl_qtranspiler.model import GraphDQN
+from rl_qtranspiler.preprocessing import preprocess_for_swap_routing
+from rl_qtranspiler.problem import PlacementProblem, build_placement_problem
+from rl_qtranspiler.trainer import DoubleDQNTrainer
+
+
+def connected_nodes(
+    graph: nx.Graph, count: int, generator: random.Random
+) -> tuple[int, ...]:
+    start = generator.randrange(graph.number_of_nodes())
+    selected = [start]
+    seen = {start}
+    queue = [start]
+    while queue and len(selected) < count:
+        node = queue.pop(0)
+        neighbors = list(graph.neighbors(node))
+        generator.shuffle(neighbors)
+        for neighbor in neighbors:
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            selected.append(neighbor)
+            queue.append(neighbor)
+            if len(selected) == count:
+                break
+    if len(selected) != count:
+        raise RuntimeError("Could not sample a sufficiently large subgraph.")
+    return tuple(sorted(selected))
+
+
+def make_problem(
+    num_qubits: int,
+    index: int,
+    *,
+    hardware,
+    family: str,
+    seed: int,
+    exact_subgraph: bool = False,
+) -> PlacementProblem:
+    circuit = generate_circuit(
+        family, num_qubits, layers=4, seed=seed + index
+    )
+    preprocessed = preprocess_for_swap_routing(circuit)
+    allowed = None
+    if exact_subgraph:
+        allowed = connected_nodes(
+            hardware.as_networkx(),
+            num_qubits,
+            random.Random(seed + index),
+        )
+    return build_placement_problem(
+        preprocessed,
+        hardware,
+        problem_id=f"{family}-{num_qubits}-{index}",
+        allowed_physical_qubits=allowed,
+    )
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--environment-steps", type=int, default=1_000_000)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--checkpoint", type=Path, default=Path("placement_dqn.pt"))
+    parser.add_argument("--warm-start-problems", type=int, default=3)
+    parser.add_argument("--warm-start-epochs", type=int, default=5)
+    parser.add_argument("--evaluation-interval", type=int, default=10_000)
+    return parser.parse_args()
+
+
+def main() -> None:
+    arguments = parse_arguments()
+    random.seed(arguments.seed)
+    np.random.seed(arguments.seed)
+    torch.manual_seed(arguments.seed)
+    hardware = load_ibm_boston()
+    trainer = DoubleDQNTrainer(GraphDQN(), device=arguments.device)
+
+    if arguments.warm_start_problems:
+        exact_problems = [
+            make_problem(
+                4 + index % 5,
+                index,
+                hardware=hardware,
+                family=SUPPORTED_FAMILIES[index % len(SUPPORTED_FAMILIES)],
+                seed=arguments.seed,
+                exact_subgraph=True,
+            )
+            for index in range(arguments.warm_start_problems)
+        ]
+        losses = supervised_warm_start(
+            trainer,
+            exact_problems,
+            epochs=arguments.warm_start_epochs,
+        )
+        print(f"Warm-start loss: {losses[-1]:.6f}")
+
+    curriculum = Curriculum()
+    validation_problems: list[PlacementProblem] = []
+    episode = 0
+    next_evaluation = arguments.evaluation_interval
+    while trainer.environment_steps < arguments.environment_steps:
+        stage = curriculum.current
+        num_qubits = random.randint(stage.minimum_qubits, stage.maximum_qubits)
+        family = SUPPORTED_FAMILIES[episode % len(SUPPORTED_FAMILIES)]
+        problem = make_problem(
+            num_qubits,
+            episode,
+            hardware=hardware,
+            family=family,
+            seed=arguments.seed,
+        )
+        reward = trainer.collect_episode(problem)
+
+        if trainer.environment_steps >= next_evaluation:
+            if not validation_problems:
+                validation_problems = [
+                    make_problem(
+                        max(stage.minimum_qubits, 4),
+                        1_000_000 + index,
+                        hardware=hardware,
+                        family=SUPPORTED_FAMILIES[
+                            index % len(SUPPORTED_FAMILIES)
+                        ],
+                        seed=arguments.seed,
+                    )
+                    for index in range(6)
+                ]
+            validation = -float(
+                np.mean(
+                    [
+                        trainer.collect_episode(
+                            item, explore=False, optimize=False
+                        )
+                        for item in validation_problems
+                    ]
+                )
+            )
+            advanced = curriculum.observe(validation)
+            if advanced:
+                validation_problems.clear()
+            print(
+                f"step={trainer.environment_steps} episode={episode} "
+                f"stage={curriculum.current.name} "
+                f"reward={reward:.5f} validation={validation:.5f} "
+                f"epsilon={trainer.epsilon:.3f} replay={len(trainer.replay)}"
+            )
+            trainer.save(arguments.checkpoint)
+            next_evaluation += arguments.evaluation_interval
+        episode += 1
+    trainer.save(arguments.checkpoint)
+
+
+if __name__ == "__main__":
+    main()
