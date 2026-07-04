@@ -74,13 +74,18 @@ def make_problem(
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--environment-steps", type=int, default=1_000_000)
+    parser.add_argument("--environment-steps", type=int, default=50000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--checkpoint", type=Path, default=Path("placement_dqn.pt"))
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume model, replay, RNG, curriculum, and validation state.",
+    )
     parser.add_argument("--warm-start-problems", type=int, default=3)
     parser.add_argument("--warm-start-epochs", type=int, default=5)
-    parser.add_argument("--evaluation-interval", type=int, default=10_000)
+    parser.add_argument("--evaluation-interval", type=int, default=1000)
     return parser.parse_args()
 
 
@@ -91,8 +96,30 @@ def main() -> None:
     torch.manual_seed(arguments.seed)
     hardware = load_ibm_boston()
     trainer = DoubleDQNTrainer(GraphDQN(), device=arguments.device)
+    curriculum = Curriculum()
+    validation_problems: list[PlacementProblem] = []
+    episode = 0
+    next_evaluation = arguments.evaluation_interval
 
-    if arguments.warm_start_problems:
+    if arguments.resume:
+        if not arguments.checkpoint.exists():
+            raise FileNotFoundError(arguments.checkpoint)
+        extra = trainer.load(arguments.checkpoint)
+        if "curriculum" in extra:
+            curriculum.load_state_dict(extra["curriculum"])
+        validation_problems = list(extra.get("validation_problems", []))
+        episode = int(extra.get("episode", 0))
+        next_evaluation = int(
+            extra.get(
+                "next_evaluation",
+                trainer.environment_steps + arguments.evaluation_interval,
+            )
+        )
+        print(
+            f"Resumed step={trainer.environment_steps} episode={episode} "
+            f"stage={curriculum.current.name} replay={len(trainer.replay)}"
+        )
+    elif arguments.warm_start_problems:
         exact_problems = [
             make_problem(
                 4 + index % 5,
@@ -111,10 +138,6 @@ def main() -> None:
         )
         print(f"Warm-start loss: {losses[-1]:.6f}")
 
-    curriculum = Curriculum()
-    validation_problems: list[PlacementProblem] = []
-    episode = 0
-    next_evaluation = arguments.evaluation_interval
     while trainer.environment_steps < arguments.environment_steps:
         stage = curriculum.current
         num_qubits = random.randint(stage.minimum_qubits, stage.maximum_qubits)
@@ -152,7 +175,11 @@ def main() -> None:
                     ]
                 )
             )
-            advanced = curriculum.observe(validation)
+            advanced = (
+                curriculum.observe(validation)
+                if trainer.has_started_learning
+                else False
+            )
             if advanced:
                 validation_problems.clear()
             print(
@@ -161,10 +188,28 @@ def main() -> None:
                 f"reward={reward:.5f} validation={validation:.5f} "
                 f"epsilon={trainer.epsilon:.3f} replay={len(trainer.replay)}"
             )
-            trainer.save(arguments.checkpoint)
+            trainer.save(
+                arguments.checkpoint,
+                extra_state={
+                    "curriculum": curriculum.state_dict(),
+                    "validation_problems": validation_problems,
+                    "episode": episode + 1,
+                    "next_evaluation": (
+                        next_evaluation + arguments.evaluation_interval
+                    ),
+                },
+            )
             next_evaluation += arguments.evaluation_interval
         episode += 1
-    trainer.save(arguments.checkpoint)
+    trainer.save(
+        arguments.checkpoint,
+        extra_state={
+            "curriculum": curriculum.state_dict(),
+            "validation_problems": validation_problems,
+            "episode": episode,
+            "next_evaluation": next_evaluation,
+        },
+    )
 
 
 if __name__ == "__main__":

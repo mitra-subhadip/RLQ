@@ -98,6 +98,8 @@ def supervised_warm_start(
             losses.append(float(loss.item()))
         epoch_losses.append(float(np.mean(losses)))
     trainer.target.load_state_dict(trainer.online.state_dict())
+    for problem in problems:
+        trainer.release_problem(problem.problem_id)
     return epoch_losses
 
 
@@ -143,3 +145,17 @@ class Curriculum:
         self.best_validation_score = float("inf")
         self.stale_evaluations = 0
         return True
+
+    def state_dict(self) -> dict[str, float | int]:
+        return {
+            "stage_index": self.stage_index,
+            "best_validation_score": self.best_validation_score,
+            "stale_evaluations": self.stale_evaluations,
+            "patience": self.patience,
+        }
+
+    def load_state_dict(self, state: dict[str, float | int]) -> None:
+        self.stage_index = int(state["stage_index"])
+        self.best_validation_score = float(state["best_validation_score"])
+        self.stale_evaluations = int(state["stale_evaluations"])
+        self.patience = int(state["patience"])

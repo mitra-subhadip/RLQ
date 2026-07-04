@@ -60,15 +60,19 @@ class PrioritizedReplayBuffer:
             self._tree[parent] += difference
             parent //= 2
 
-    def add(self, transition: Transition, priority: float | None = None) -> None:
+    def add(
+        self, transition: Transition, priority: float | None = None
+    ) -> Transition | None:
         raw_priority = self._maximum_priority if priority is None else priority
         scaled = (abs(raw_priority) + self.priority_epsilon) ** self.alpha
         data_index = self._write_index
+        evicted = self._data[data_index] if self._size == self.capacity else None
         self._data[data_index] = transition
         self._set_tree_priority(data_index + self.capacity, scaled)
         self._write_index = (self._write_index + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
         self._maximum_priority = max(self._maximum_priority, abs(raw_priority))
+        return evicted
 
     def _find_leaf(self, value: float) -> int:
         index = 1
@@ -121,3 +125,26 @@ class PrioritizedReplayBuffer:
             scaled = (raw + self.priority_epsilon) ** self.alpha
             self._set_tree_priority(int(tree_index), scaled)
             self._maximum_priority = max(self._maximum_priority, raw)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "capacity": self.capacity,
+            "alpha": self.alpha,
+            "priority_epsilon": self.priority_epsilon,
+            "tree": self._tree.copy(),
+            "data": list(self._data),
+            "write_index": self._write_index,
+            "size": self._size,
+            "maximum_priority": self._maximum_priority,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        if int(state["capacity"]) != self.capacity:
+            raise ValueError("Replay capacity does not match the checkpoint.")
+        self.alpha = float(state["alpha"])
+        self.priority_epsilon = float(state["priority_epsilon"])
+        self._tree = np.asarray(state["tree"], dtype=np.float64).copy()
+        self._data = list(state["data"])
+        self._write_index = int(state["write_index"])
+        self._size = int(state["size"])
+        self._maximum_priority = float(state["maximum_priority"])

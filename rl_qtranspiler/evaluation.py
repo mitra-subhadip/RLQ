@@ -18,7 +18,7 @@ class ProxyMetrics:
     distance_score: float
     calibration_score: float
     combined_score: float
-    runtime_seconds: float
+    scoring_runtime_seconds: float
 
 
 @dataclass(frozen=True)

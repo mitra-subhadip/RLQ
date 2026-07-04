@@ -135,7 +135,7 @@ def build_hardware_graph(
 
 
 def load_ibm_boston() -> HardwareGraph:
-    from ibm_boston_connectivity_snapshot import (
+    from rl_qtranspiler.ibm_boston_connectivity_snapshot import (
         BACKEND_NAME,
         COUPLING_DATA,
         NUM_QUBITS,

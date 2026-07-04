@@ -47,21 +47,22 @@ def main() -> None:
         problem_id=arguments.circuit.stem,
     )
 
-    mappings: dict[str, tuple[int, ...]] = {
-        "identity": identity_mapping(problem),
-        "random": random_mapping(problem, seed=arguments.seed),
-        "degree": degree_centrality_mapping(problem),
-        "greedy": greedy_mapping(problem),
+    placement_functions = {
+        "identity": lambda: identity_mapping(problem),
+        "random": lambda: random_mapping(problem, seed=arguments.seed),
+        "degree": lambda: degree_centrality_mapping(problem),
+        "greedy": lambda: greedy_mapping(problem),
     }
     for heuristic in ("basic", "lookahead", "decay"):
-        mappings[f"sabre_{heuristic}"] = sabre_mapping(
-            circuit,
-            problem,
-            heuristic=heuristic,
-            seed=arguments.seed,
+        placement_functions[f"sabre_{heuristic}"] = (
+            lambda selected=heuristic: sabre_mapping(
+                circuit,
+                problem,
+                heuristic=selected,
+                seed=arguments.seed,
+            )
         )
 
-    dqn_metadata = None
     if arguments.checkpoint:
         model = GraphDQN().to(arguments.device)
         checkpoint = torch.load(
@@ -70,26 +71,29 @@ def main() -> None:
             weights_only=False,
         )
         model.load_state_dict(checkpoint["model"])
-        result = place(model, problem)
-        mappings["graph_dqn"] = tuple(
-            result.logical_to_physical[index]
-            for index in range(problem.num_logical_qubits)
-        )
-        dqn_metadata = {
-            "beam_width": result.beam_width,
-            "runtime_seconds": result.runtime_seconds,
-        }
+
+        def graph_dqn_mapping() -> tuple[int, ...]:
+            result = place(model, problem)
+            return tuple(
+                result.logical_to_physical[index]
+                for index in range(problem.num_logical_qubits)
+            )
+
+        placement_functions["graph_dqn"] = graph_dqn_mapping
 
     report: dict[str, object] = {
         "backend": hardware.name,
         "circuit": arguments.circuit.name,
         "placements": {},
     }
-    for name, mapping in mappings.items():
+    for name, placement_function in placement_functions.items():
         started = perf_counter()
-        proxy = evaluate_mapping(problem, mapping, started_at=started)
+        mapping = placement_function()
+        placement_seconds = perf_counter() - started
+        proxy = evaluate_mapping(problem, mapping)
         metrics: dict[str, object] = {
             "mapping": mapping,
+            "placement_runtime_seconds": placement_seconds,
             "proxy": proxy.__dict__,
         }
         if not arguments.skip_routing:
@@ -97,8 +101,6 @@ def main() -> None:
                 circuit, problem, mapping, seed=arguments.seed
             ).__dict__
         report["placements"][name] = metrics
-    if dqn_metadata:
-        report["graph_dqn_inference"] = dqn_metadata
     print(json.dumps(report, indent=2))
 
 

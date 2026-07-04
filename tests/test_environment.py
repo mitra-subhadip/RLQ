@@ -24,7 +24,7 @@ def make_problem():
 def test_problem_weights_order_and_isolated_qubit():
     problem = make_problem()
     assert problem.interaction_counts[0, 1] == 2
-    assert np.isclose(problem.interaction_weights[0, 1], 2.0)
+    assert np.isclose(problem.interaction_weights[0, 1], 1.0 + 0.99)
     assert problem.placement_order[-1] == 3
     assert set(problem.placement_order) == {0, 1, 2, 3}
 
@@ -65,6 +65,26 @@ def test_sabre_baseline_produces_injective_mapping():
     )
     assert len(mapping) == problem.num_logical_qubits
     assert len(set(mapping)) == problem.num_logical_qubits
+
+
+def test_barriers_are_not_interactions_and_fused_gates_advance_time():
+    hardware = load_ibm_boston()
+    barrier_circuit = QuantumCircuit(2)
+    barrier_circuit.barrier(0, 1)
+    barrier_problem = build_placement_problem(
+        preprocess_for_swap_routing(barrier_circuit), hardware
+    )
+    assert barrier_problem.interaction_weights[0, 1] == 0
+
+    fused = QuantumCircuit(2)
+    fused.cz(0, 1)
+    fused.cz(0, 1)
+    fused_problem = build_placement_problem(
+        preprocess_for_swap_routing(fused),
+        hardware,
+        temporal_discount=0.5,
+    )
+    assert np.isclose(fused_problem.interaction_weights[0, 1], 1.5)
 
 
 def problem_id_to_circuit():

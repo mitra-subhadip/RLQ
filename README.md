@@ -30,12 +30,17 @@ print(result.logical_to_physical)
 Train with `train_placement.py`; place an OpenQASM circuit with
 `place_circuit.py`; compare identity, random, degree, greedy, SABRE
 basic/lookahead/decay, and Graph-DQN mappings with `benchmark_placement.py`.
-The default trainer uses prioritized replay, Double DQN, dueling action values,
-temporal interaction weights, and the staged curriculum described in the
-implementation plan.
+Installed wheels also provide `rlq-train`, `rlq-place`, and `rlq-benchmark`.
+The trainer uses prioritized replay, batched Double DQN updates, dueling action
+values, temporal interaction weights, bounded problem retention, and the
+staged curriculum described in the implementation plan.
 
-The default training budget is one million placement transitions. Use
-`--environment-steps` for a shorter smoke run.
+Resume a complete checkpoint—including replay, RNG, curriculum, and validation
+state—with:
+
+```bash
+rlq-train --checkpoint placement_dqn.pt --resume
+```
 
 The calibration snapshot is static. Refresh
 `ibm_boston_connectivity_snapshot.py` before experiments that require current

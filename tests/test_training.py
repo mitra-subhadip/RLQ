@@ -28,6 +28,7 @@ def test_double_dqn_update_and_checkpoint(tmp_path: Path):
         batch_size=2,
         target_update_steps=1,
         epsilon_decay_steps=10,
+        training_frequency=1,
     )
     trainer = DoubleDQNTrainer(GraphDQN(hidden_dim=16), config=config)
     reward = trainer.collect_episode(problem)
@@ -37,11 +38,15 @@ def test_double_dqn_update_and_checkpoint(tmp_path: Path):
     assert trainer.optimization_steps == 1
 
     checkpoint = tmp_path / "smoke.pt"
-    trainer.save(checkpoint)
+    trainer.save(checkpoint, extra_state={"episode": 7})
     restored = DoubleDQNTrainer(GraphDQN(hidden_dim=16), config=config)
-    restored.load(checkpoint)
+    extra = restored.load(checkpoint)
     assert restored.environment_steps == trainer.environment_steps
     assert restored.optimization_steps == trainer.optimization_steps
+    assert len(restored.replay) == len(trainer.replay)
+    assert restored.config == config
+    assert set(restored.problems) == set(trainer.problems)
+    assert extra == {"episode": 7}
 
 
 def test_exact_teacher_and_supervised_warm_start():
@@ -65,3 +70,30 @@ def test_exact_teacher_and_supervised_warm_start():
     assert len(trajectory) == 2
     assert len(losses) == 1
     assert losses[0] >= 0
+
+
+def test_problem_registry_tracks_only_replay_references():
+    hardware = load_ibm_boston()
+    config = TrainerConfig(
+        replay_capacity=4,
+        warmup_transitions=100,
+        batch_size=2,
+    )
+    trainer = DoubleDQNTrainer(GraphDQN(hidden_dim=8), config=config)
+    for index in range(6):
+        circuit = QuantumCircuit(2)
+        circuit.cz(0, 1)
+        problem = build_placement_problem(
+            preprocess_for_swap_routing(circuit),
+            hardware,
+            problem_id=f"bounded-{index}",
+        )
+        trainer.collect_episode(problem, optimize=False)
+
+    referenced = {
+        transition.problem_id
+        for transition in trainer.replay._data
+        if transition is not None
+    }
+    assert set(trainer.problems) == referenced
+    assert len(trainer.problems) <= 2

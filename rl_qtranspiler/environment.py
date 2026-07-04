@@ -235,6 +235,7 @@ def build_state_features(
 
     physical_dynamic = np.column_stack(
         [
+            problem.allowed_physical_mask.astype(float),
             occupied.astype(float),
             assigned_degree,
             current_affinity,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from qiskit.circuit import Gate
 
 from .hardware import HardwareGraph
 from .preprocessing import PreprocessingResult
@@ -52,13 +53,19 @@ def build_placement_problem(
 
     two_qubit_position = 0
     for instruction in result.instructions:
-        if len(instruction.qargs) != 2:
+        if (
+            len(instruction.qargs) != 2
+            or not isinstance(instruction.operation, Gate)
+        ):
             continue
         left, right = instruction.qargs
         if left == right:
             continue
         multiplicity = len(instruction.source_indices)
-        contribution = multiplicity * temporal_discount**two_qubit_position
+        contribution = sum(
+            temporal_discount ** (two_qubit_position + offset)
+            for offset in range(multiplicity)
+        )
         weights[left, right] += contribution
         weights[right, left] += contribution
         counts[left, right] += multiplicity
@@ -66,7 +73,7 @@ def build_placement_problem(
         earliest[left, right] = earliest[right, left] = min(
             earliest[left, right], two_qubit_position
         )
-        two_qubit_position += 1
+        two_qubit_position += multiplicity
 
     weighted_degree = weights.sum(axis=1)
     interaction_count = counts.sum(axis=1)

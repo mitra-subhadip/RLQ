@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import copy
+import random as random_module
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from random import choice, random
 
 import numpy as np
 import torch
@@ -32,6 +32,7 @@ class TrainerConfig:
     priority_beta_steps: int = 1_000_000
     gamma: float = 1.0
     gradient_clip: float = 10.0
+    training_frequency: int = 4
 
 
 class DoubleDQNTrainer:
@@ -55,6 +56,7 @@ class DoubleDQNTrainer:
             alpha=self.config.priority_alpha,
         )
         self.problems: dict[str, PlacementProblem] = {}
+        self._problem_ref_counts: dict[str, int] = {}
         self.environment_steps = 0
         self.optimization_steps = 0
 
@@ -63,6 +65,24 @@ class DoubleDQNTrainer:
         if existing is not None and existing is not problem:
             raise ValueError(f"Duplicate problem id {problem.problem_id!r}.")
         self.problems[problem.problem_id] = problem
+
+    def release_problem(self, problem_id: str) -> None:
+        if self._problem_ref_counts.get(problem_id, 0) == 0:
+            self.problems.pop(problem_id, None)
+
+    def _retain_transition_problem(self, problem: PlacementProblem) -> None:
+        self.register_problem(problem)
+        self._problem_ref_counts[problem.problem_id] = (
+            self._problem_ref_counts.get(problem.problem_id, 0) + 1
+        )
+
+    def _release_transition_problem(self, problem_id: str) -> None:
+        remaining = self._problem_ref_counts[problem_id] - 1
+        if remaining:
+            self._problem_ref_counts[problem_id] = remaining
+        else:
+            del self._problem_ref_counts[problem_id]
+            self.problems.pop(problem_id, None)
 
     @property
     def epsilon(self) -> float:
@@ -82,6 +102,10 @@ class DoubleDQNTrainer:
             1.0 - self.config.priority_beta_start
         )
 
+    @property
+    def has_started_learning(self) -> bool:
+        return self.optimization_steps > 0
+
     def select_action(
         self,
         problem: PlacementProblem,
@@ -92,8 +116,8 @@ class DoubleDQNTrainer:
         valid = np.flatnonzero(
             problem.valid_action_mask(state.physical_to_logical)
         )
-        if explore and random() < self.epsilon:
-            return int(choice(valid.tolist()))
+        if explore and random_module.random() < self.epsilon:
+            return int(random_module.choice(valid.tolist()))
         return int(np.argmax(self.online.action_values(problem, state)))
 
     def collect_episode(
@@ -103,7 +127,6 @@ class DoubleDQNTrainer:
         explore: bool = True,
         optimize: bool = True,
     ) -> float:
-        self.register_problem(problem)
         environment = PlacementEnvironment(problem)
         state = environment.reset()
         total_reward = 0.0
@@ -111,20 +134,25 @@ class DoubleDQNTrainer:
             action = self.select_action(problem, state, explore=explore)
             next_state, reward, done, _ = environment.step(action)
             if explore:
-                self.replay.add(
-                    Transition(
-                        problem.problem_id,
-                        state,
-                        action,
-                        reward,
-                        next_state,
-                        done,
-                    )
+                transition = Transition(
+                    problem.problem_id,
+                    state,
+                    action,
+                    reward,
+                    next_state,
+                    done,
                 )
+                self._retain_transition_problem(problem)
+                evicted = self.replay.add(transition)
+                if evicted is not None:
+                    self._release_transition_problem(evicted.problem_id)
                 self.environment_steps += 1
                 if (
                     optimize
                     and len(self.replay) >= self.config.warmup_transitions
+                    and self.environment_steps
+                    % self.config.training_frequency
+                    == 0
                 ):
                     self.optimize_step()
             state = next_state
@@ -135,33 +163,52 @@ class DoubleDQNTrainer:
         batch = self.replay.sample(
             self.config.batch_size, self.priority_beta
         )
-        predicted_values: list[torch.Tensor] = []
-        target_values: list[torch.Tensor] = []
-
-        for transition in batch.transitions:
-            problem = self.problems[transition.problem_id]
-            q_values = self.online(problem, transition.state)
-            predicted_values.append(q_values[transition.action])
-            with torch.no_grad():
-                if transition.done:
-                    bootstrap = torch.tensor(0.0, device=self.device)
-                else:
-                    online_next = self.online(problem, transition.next_state)
-                    best_action = int(torch.argmax(online_next).item())
-                    bootstrap = self.target(
-                        problem, transition.next_state
-                    )[best_action]
-                target_values.append(
-                    torch.tensor(
-                        transition.reward,
-                        device=self.device,
-                        dtype=torch.float32,
-                    )
-                    + self.config.gamma * bootstrap
+        problems = [
+            self.problems[transition.problem_id]
+            for transition in batch.transitions
+        ]
+        states = [transition.state for transition in batch.transitions]
+        actions = torch.as_tensor(
+            [transition.action for transition in batch.transitions],
+            device=self.device,
+            dtype=torch.long,
+        )
+        self.online.train()
+        q_values = self.online.forward_batch(problems, states)
+        predictions = q_values.gather(1, actions[:, None]).squeeze(1)
+        targets = torch.as_tensor(
+            [transition.reward for transition in batch.transitions],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        nonterminal_indices = [
+            index
+            for index, transition in enumerate(batch.transitions)
+            if not transition.done
+        ]
+        with torch.no_grad():
+            if nonterminal_indices:
+                next_problems = [problems[index] for index in nonterminal_indices]
+                next_states = [
+                    batch.transitions[index].next_state
+                    for index in nonterminal_indices
+                ]
+                online_next = self.online.forward_batch(
+                    next_problems, next_states
                 )
-
-        predictions = torch.stack(predicted_values)
-        targets = torch.stack(target_values)
+                best_actions = online_next.argmax(dim=1)
+                target_next = self.target.forward_batch(
+                    next_problems, next_states
+                )
+                bootstrap = target_next.gather(
+                    1, best_actions[:, None]
+                ).squeeze(1)
+                target_indices = torch.as_tensor(
+                    nonterminal_indices,
+                    device=self.device,
+                    dtype=torch.long,
+                )
+                targets[target_indices] += self.config.gamma * bootstrap
         weights = torch.as_tensor(
             batch.importance_weights,
             device=self.device,
@@ -186,7 +233,12 @@ class DoubleDQNTrainer:
             self.target.load_state_dict(self.online.state_dict())
         return float(loss.item())
 
-    def save(self, path: str | Path) -> None:
+    def save(
+        self,
+        path: str | Path,
+        *,
+        extra_state: dict[str, object] | None = None,
+    ) -> None:
         torch.save(
             {
                 "model": self.online.state_dict(),
@@ -195,16 +247,39 @@ class DoubleDQNTrainer:
                 "config": asdict(self.config),
                 "environment_steps": self.environment_steps,
                 "optimization_steps": self.optimization_steps,
+                "replay": self.replay.state_dict(),
+                "problems": self.problems,
+                "problem_ref_counts": self._problem_ref_counts,
+                "python_random_state": random_module.getstate(),
+                "numpy_random_state": np.random.get_state(),
+                "torch_random_state": torch.get_rng_state(),
+                "extra_state": extra_state or {},
             },
             Path(path),
         )
 
-    def load(self, path: str | Path) -> None:
+    def load(self, path: str | Path) -> dict[str, object]:
         checkpoint = torch.load(
             Path(path), map_location=self.device, weights_only=False
         )
+        self.config = TrainerConfig(**checkpoint["config"])
         self.online.load_state_dict(checkpoint["model"])
         self.target.load_state_dict(checkpoint["target"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.environment_steps = checkpoint["environment_steps"]
         self.optimization_steps = checkpoint["optimization_steps"]
+        self.replay = PrioritizedReplayBuffer(
+            self.config.replay_capacity,
+            alpha=self.config.priority_alpha,
+        )
+        if "replay" in checkpoint:
+            self.replay.load_state_dict(checkpoint["replay"])
+        self.problems = checkpoint.get("problems", {})
+        self._problem_ref_counts = checkpoint.get("problem_ref_counts", {})
+        if "python_random_state" in checkpoint:
+            random_module.setstate(checkpoint["python_random_state"])
+        if "numpy_random_state" in checkpoint:
+            np.random.set_state(checkpoint["numpy_random_state"])
+        if "torch_random_state" in checkpoint:
+            torch.set_rng_state(checkpoint["torch_random_state"].cpu())
+        return checkpoint.get("extra_state", {})
