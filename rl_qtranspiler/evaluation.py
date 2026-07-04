@@ -56,7 +56,10 @@ def evaluate_routed_circuit(
 ) -> RoutedMetrics:
     """Route with Qiskit SABRE and collect hardware-aware diagnostics."""
     start = perf_counter()
-    coupling = CouplingMap(problem.hardware.edges.tolist())
+    undirected_edges = problem.hardware.edges.tolist()
+    coupling = CouplingMap(
+        undirected_edges + [[right, left] for left, right in undirected_edges]
+    )
     routed = transpile(
         circuit,
         coupling_map=coupling,

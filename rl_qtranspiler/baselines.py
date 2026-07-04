@@ -80,7 +80,10 @@ def sabre_mapping(
     """Return SABRE's initial layout using basic, lookahead, or decay routing."""
     if heuristic not in {"basic", "lookahead", "decay"}:
         raise ValueError("SABRE heuristic must be basic, lookahead, or decay.")
-    coupling = CouplingMap(problem.hardware.edges.tolist())
+    undirected_edges = problem.hardware.edges.tolist()
+    coupling = CouplingMap(
+        undirected_edges + [[right, left] for left, right in undirected_edges]
+    )
     routing = SabreSwap(
         coupling,
         heuristic=heuristic,

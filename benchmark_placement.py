@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Compare graph-DQN placement with deterministic, random, and SABRE layouts."""
 
 from __future__ import annotations

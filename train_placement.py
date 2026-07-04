@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Train the graph DQN on generated placement problems."""
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ def make_problem(
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--environment-steps", type=int, default=50000)
+    parser.add_argument("--environment-steps", type=int, default=15000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--checkpoint", type=Path, default=Path("placement_dqn.pt"))
