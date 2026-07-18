@@ -20,8 +20,8 @@ rlq-train = "train_placement:main"
 rlq-place = "place_circuit:main"
 rlq-benchmark = "benchmark_placement:main"
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
+[dependency-groups]
+test = ["pytest>=8"]
 
 [tool.setuptools]
 py-modules = ["train_placement", "place_circuit", "benchmark_placement"]
