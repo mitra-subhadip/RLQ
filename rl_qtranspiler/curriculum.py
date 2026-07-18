@@ -113,7 +113,9 @@ class CurriculumStage:
 class Curriculum:
     """Advance after validation fails to improve for a fixed patience."""
 
-    def __init__(self, patience: int = 5) -> None:
+    def __init__(self, patience: int = 2) -> None:
+        if patience < 1:
+            raise ValueError("patience must be positive.")
         self.stages = (
             CurriculumStage(4, 8, "small"),
             CurriculumStage(9, 16, "medium"),

@@ -3,6 +3,7 @@ from pathlib import Path
 from qiskit import QuantumCircuit
 
 from rl_qtranspiler.curriculum import (
+    Curriculum,
     expert_trajectory,
     solve_exact,
     supervised_warm_start,
@@ -12,6 +13,15 @@ from rl_qtranspiler.model import GraphDQN
 from rl_qtranspiler.preprocessing import preprocess_for_swap_routing
 from rl_qtranspiler.problem import build_placement_problem
 from rl_qtranspiler.trainer import DoubleDQNTrainer, TrainerConfig
+
+
+def test_default_curriculum_advances_after_two_stale_evaluations():
+    curriculum = Curriculum()
+
+    assert not curriculum.observe(0.1)
+    assert not curriculum.observe(0.1)
+    assert curriculum.observe(0.1)
+    assert curriculum.current.name == "medium"
 
 
 def test_double_dqn_update_and_checkpoint(tmp_path: Path):

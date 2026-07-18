@@ -73,7 +73,7 @@ def make_problem(
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--environment-steps", type=int, default=15000)
+    parser.add_argument("--environment-steps", type=int, default=50000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--checkpoint", type=Path, default=Path("placement_dqn.pt"))
@@ -85,6 +85,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--warm-start-problems", type=int, default=3)
     parser.add_argument("--warm-start-epochs", type=int, default=5)
     parser.add_argument("--evaluation-interval", type=int, default=1000)
+    parser.add_argument("--curriculum-patience", type=int, default=2)
     return parser.parse_args()
 
 
@@ -95,7 +96,7 @@ def main() -> None:
     torch.manual_seed(arguments.seed)
     hardware = load_ibm_boston()
     trainer = DoubleDQNTrainer(GraphDQN(), device=arguments.device)
-    curriculum = Curriculum()
+    curriculum = Curriculum(patience=arguments.curriculum_patience)
     validation_problems: list[PlacementProblem] = []
     episode = 0
     next_evaluation = arguments.evaluation_interval
@@ -106,6 +107,7 @@ def main() -> None:
         extra = trainer.load(arguments.checkpoint)
         if "curriculum" in extra:
             curriculum.load_state_dict(extra["curriculum"])
+            curriculum.patience = arguments.curriculum_patience
         validation_problems = list(extra.get("validation_problems", []))
         episode = int(extra.get("episode", 0))
         next_evaluation = int(

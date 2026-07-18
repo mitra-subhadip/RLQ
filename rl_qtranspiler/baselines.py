@@ -53,20 +53,50 @@ def degree_centrality_mapping(problem: PlacementProblem) -> tuple[int, ...]:
     return tuple(mapping)
 
 
-def greedy_mapping(problem: PlacementProblem) -> tuple[int, ...]:
+def _greedy_completion(
+    problem: PlacementProblem,
+    first_action: int,
+) -> tuple[tuple[int, ...], float]:
     environment = PlacementEnvironment(problem)
     state = environment.reset()
+    state, _, _, _ = environment.step(first_action)
     while not state.done:
         logical = environment.current_logical_qubit(state)
         candidates = np.flatnonzero(environment.valid_action_mask(state))
         action = min(
             candidates,
-            key=lambda physical: environment.incremental_score(
-                state, logical, int(physical)
-            ).combined,
+            key=lambda physical: (
+                environment.incremental_score(
+                    state, logical, int(physical)
+                ).combined,
+                int(physical),
+            ),
         )
         state, _, _, _ = environment.step(int(action))
-    return state.logical_to_physical
+    return state.logical_to_physical, environment.score.combined
+
+
+def greedy_mapping(problem: PlacementProblem) -> tuple[int, ...]:
+    """Greedily complete placements from the five highest-degree anchors."""
+    allowed = np.flatnonzero(problem.allowed_physical_mask).tolist()
+    degree = problem.hardware.static_node_features[:, 0]
+    first_actions = sorted(
+        allowed,
+        key=lambda physical: (-float(degree[physical]), physical),
+    )[:5]
+
+    best_mapping: tuple[int, ...] | None = None
+    best_key: tuple[float, tuple[int, ...]] | None = None
+    for first_action in first_actions:
+        mapping, combined_score = _greedy_completion(problem, first_action)
+        key = (combined_score, mapping)
+        if best_key is None or key < best_key:
+            best_mapping = mapping
+            best_key = key
+
+    if best_mapping is None:
+        raise RuntimeError("No valid physical qubits are available.")
+    return best_mapping
 
 
 def sabre_mapping(

@@ -12,7 +12,7 @@ Ensure you're using the pip>=26.1
 ```bash
 conda activate <environment-name>
 python -m pip install -r pylock.toml
-python -m pip install -e .
+python -m pip install -e
 ```
 
 ## Core API

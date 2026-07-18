@@ -46,6 +46,20 @@ def test_rewards_sum_to_negative_terminal_score():
     assert np.isclose(environment.score.combined, independent.combined)
 
 
+def test_greedy_mapping_starts_from_a_top_five_degree_anchor():
+    problem = make_problem()
+    mapping = greedy_mapping(problem)
+    degree = problem.hardware.static_node_features[:, 0]
+    allowed = np.flatnonzero(problem.allowed_physical_mask).tolist()
+    top_five = sorted(
+        allowed,
+        key=lambda physical: (-float(degree[physical]), physical),
+    )[:5]
+
+    first_logical = problem.placement_order[0]
+    assert mapping[first_logical] in top_five
+
+
 def test_invalid_occupied_action_is_rejected():
     problem = make_problem()
     environment = PlacementEnvironment(problem)

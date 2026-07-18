@@ -26,7 +26,7 @@ class TrainerConfig:
     target_update_steps: int = 2_000
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 250_000
+    epsilon_decay_steps: int = 50_000
     priority_alpha: float = 0.6
     priority_beta_start: float = 0.4
     priority_beta_steps: int = 1_000_000
