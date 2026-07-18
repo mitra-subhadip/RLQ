@@ -87,6 +87,39 @@ def test_barriers_are_not_interactions_and_fused_gates_advance_time():
     assert np.isclose(fused_problem.interaction_weights[0, 1], 1.5)
 
 
+def test_disjoint_gate_order_does_not_change_temporal_weights():
+    hardware = load_ibm_boston()
+
+    first = QuantumCircuit(4)
+    first.cz(0, 1)
+    first.cz(2, 3)
+    first.cz(1, 2)
+
+    reordered = QuantumCircuit(4)
+    reordered.cz(2, 3)
+    reordered.cz(0, 1)
+    reordered.cz(1, 2)
+
+    first_problem = build_placement_problem(
+        preprocess_for_swap_routing(first),
+        hardware,
+        temporal_discount=0.5,
+    )
+    reordered_problem = build_placement_problem(
+        preprocess_for_swap_routing(reordered),
+        hardware,
+        temporal_discount=0.5,
+    )
+
+    assert np.array_equal(
+        first_problem.interaction_weights,
+        reordered_problem.interaction_weights,
+    )
+    assert first_problem.interaction_weights[0, 1] == 1.0
+    assert first_problem.interaction_weights[2, 3] == 1.0
+    assert first_problem.interaction_weights[1, 2] == 0.5
+
+
 def problem_id_to_circuit():
     circuit = QuantumCircuit(4)
     circuit.cz(0, 1)

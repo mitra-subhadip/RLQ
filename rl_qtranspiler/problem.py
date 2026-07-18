@@ -51,7 +51,11 @@ def build_placement_problem(
     counts = np.zeros((num_logical, num_logical), dtype=np.int32)
     earliest = np.full((num_logical, num_logical), np.inf, dtype=np.float64)
 
-    two_qubit_position = 0
+    # Schedule two-qubit interactions into ASAP layers. Gates on disjoint
+    # logical qubits share a layer regardless of their order in circuit.data,
+    # while interactions that share a qubit remain sequential.
+    last_interaction_layer = np.full(num_logical, -1, dtype=np.int32)
+    maximum_interaction_layer = -1
     for instruction in result.instructions:
         if (
             len(instruction.qargs) != 2
@@ -62,23 +66,36 @@ def build_placement_problem(
         if left == right:
             continue
         multiplicity = len(instruction.source_indices)
-        contribution = sum(
-            temporal_discount ** (two_qubit_position + offset)
-            for offset in range(multiplicity)
+        first_layer = (
+            max(
+                int(last_interaction_layer[left]),
+                int(last_interaction_layer[right]),
+            )
+            + 1
         )
+        layers = np.arange(
+            first_layer,
+            first_layer + multiplicity,
+            dtype=np.int32,
+        )
+        contribution = float(np.power(temporal_discount, layers).sum())
         weights[left, right] += contribution
         weights[right, left] += contribution
         counts[left, right] += multiplicity
         counts[right, left] += multiplicity
         earliest[left, right] = earliest[right, left] = min(
-            earliest[left, right], two_qubit_position
+            earliest[left, right], first_layer
         )
-        two_qubit_position += multiplicity
+        last_layer = first_layer + multiplicity - 1
+        last_interaction_layer[left] = last_layer
+        last_interaction_layer[right] = last_layer
+        maximum_interaction_layer = max(maximum_interaction_layer, last_layer)
 
     weighted_degree = weights.sum(axis=1)
     interaction_count = counts.sum(axis=1)
     earliest_by_qubit = np.min(earliest, axis=1)
-    fallback_earliest = float(max(two_qubit_position, 1))
+    interaction_horizon = max(maximum_interaction_layer + 1, 1)
+    fallback_earliest = float(interaction_horizon)
     earliest_by_qubit[~np.isfinite(earliest_by_qubit)] = fallback_earliest
     order = tuple(
         sorted(

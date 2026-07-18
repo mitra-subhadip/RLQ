@@ -32,8 +32,8 @@ class PlacementEnvironment:
         self,
         problem: PlacementProblem,
         *,
-        distance_weight: float = 0.5,
-        calibration_weight: float = 0.5,
+        distance_weight: float = 0.9,
+        calibration_weight: float = 0.1,
     ) -> None:
         if not np.isclose(distance_weight + calibration_weight, 1.0):
             raise ValueError("Reward weights must sum to one.")
