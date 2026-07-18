@@ -1,7 +1,6 @@
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
-*.pt
 *.pth
 *.vscode
 *.pytest_cache
