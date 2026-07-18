@@ -99,7 +99,7 @@ def generate_circuit(
 ) -> QuantumCircuit:
     if family not in SUPPORTED_FAMILIES:
         raise ValueError(f"Unknown circuit family {family!r}.")
-    if not 1 <= num_qubits <= 30:
+    if not 1 <= num_qubits:
         raise ValueError("Generated circuits must contain 1-30 qubits.")
     generator = np.random.default_rng(seed)
     circuit = QuantumCircuit(num_qubits, name=f"{family}_{num_qubits}")

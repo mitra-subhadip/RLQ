@@ -119,8 +119,8 @@ class Curriculum:
         self.stages = (
             CurriculumStage(4, 8, "small"),
             CurriculumStage(9, 16, "medium"),
-            CurriculumStage(17, 30, "large"),
-            CurriculumStage(4, 30, "mixed"),
+            CurriculumStage(17, 156, "large"),
+            CurriculumStage(4, 156, "mixed"),
         )
         self.patience = patience
         self.stage_index = 0

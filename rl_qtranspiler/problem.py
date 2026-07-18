@@ -42,7 +42,7 @@ def build_placement_problem(
     if not 0 < temporal_discount <= 1:
         raise ValueError("temporal_discount must be in (0, 1].")
     num_logical = result.original.num_qubits
-    if num_logical > 30:
+    if num_logical > 156:
         raise ValueError("Version one supports at most 30 logical qubits.")
     if num_logical > hardware.num_qubits:
         raise ValueError("The circuit has more qubits than the hardware.")
