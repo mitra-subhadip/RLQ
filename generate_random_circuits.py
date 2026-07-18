@@ -19,7 +19,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--max-qubits", type=int, default=60)
     parser.add_argument("--min-depth", type=int, default=40)
     parser.add_argument("--max-depth", type=int, default=100)
-    parser.add_argument("--two-qubit-density", type=float, default=0.6)
+    parser.add_argument("--two-qubit-density", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("random_circuits"))
     parser.add_argument("--format", choices=("qasm2", "qasm3"), default="qasm3")

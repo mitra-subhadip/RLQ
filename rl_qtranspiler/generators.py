@@ -23,7 +23,7 @@ def generate_layered_random_circuit(
     num_qubits: int,
     depth: int,
     *,
-    two_qubit_density: float = 0.6,
+    two_qubit_density: float = 0.25,
     seed: int | None = None,
 ) -> QuantumCircuit:
     """Generate an exact-depth random circuit using RZ, SX, X, and CZ gates.

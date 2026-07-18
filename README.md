@@ -46,9 +46,9 @@ python generate_random_circuits.py --count 10 --output-dir random_circuits
 ```
 
 Use `--seed` for reproducibility, `--two-qubit-density` to control the fraction
-of qubits participating in CZ gates per layer, and `--format qasm2` when OpenQASM
-2 output is preferred. The command prints a table containing each file's seed,
-size, exact depth, and gate counts.
+of qubits participating in CZ gates per layer (default: `0.25`), and
+`--format qasm2` when OpenQASM 2 output is preferred. The command prints a table
+containing each file's seed, size, exact depth, and gate counts.
 
 Resume a complete checkpoint—including replay, RNG, curriculum, and validation
 state—with:
