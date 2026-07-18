@@ -19,12 +19,18 @@ dependencies = [
 rlq-train = "train_placement:main"
 rlq-place = "place_circuit:main"
 rlq-benchmark = "benchmark_placement:main"
+rlq-generate-random = "generate_random_circuits:main"
 
 [dependency-groups]
 test = ["pytest>=8"]
 
 [tool.setuptools]
-py-modules = ["train_placement", "place_circuit", "benchmark_placement"]
+py-modules = [
+    "train_placement",
+    "place_circuit",
+    "benchmark_placement",
+    "generate_random_circuits",
+]
 
 [tool.setuptools.packages.find]
 include = ["rl_qtranspiler*"]
