@@ -36,6 +36,10 @@ basic/lookahead/decay, and Graph-DQN mappings with `benchmark_placement.py`.
 Installed wheels also provide `rlq-train`, `rlq-place`, and `rlq-benchmark`.
 Training automatically selects CUDA, then Apple MPS, then CPU; pass
 `--device cpu` (or another explicit PyTorch device) to override it.
+Warm-start training batches up to 128 expert examples while preserving the
+legacy optimizer-update budget by default (75 updates with the standard three
+problems and five epochs). Use `--warm-start-updates` to set that budget
+directly and `--warm-start-batch-size` to tune throughput.
 The trainer uses prioritized replay, batched Double DQN updates, dueling action
 values, temporal interaction weights, bounded problem retention, and the
 staged curriculum described in the implementation plan.

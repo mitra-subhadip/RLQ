@@ -4,6 +4,7 @@ from qiskit import QuantumCircuit
 
 from rl_qtranspiler.curriculum import (
     Curriculum,
+    expert_action_accuracy,
     expert_trajectory,
     solve_exact,
     supervised_warm_start,
@@ -78,8 +79,32 @@ def test_exact_teacher_and_supervised_warm_start():
 
     assert len(set(solution.logical_to_physical)) == 2
     assert len(trajectory) == 2
-    assert len(losses) == 1
+    assert len(losses) == len(trajectory)
     assert losses[0] >= 0
+    optimizer_steps = {
+        int(state["step"].item())
+        for state in trainer.optimizer.state.values()
+    }
+    assert optimizer_steps == {len(trajectory)}
+    accuracy = expert_action_accuracy(trainer, [problem])
+    assert 0.0 <= accuracy <= 1.0
+
+    batched_trainer = DoubleDQNTrainer(
+        GraphDQN(hidden_dim=16),
+        config=TrainerConfig(replay_capacity=8, batch_size=2),
+    )
+    supervised_warm_start(
+        batched_trainer,
+        [problem],
+        epochs=1,
+        batch_size=2,
+        updates=1,
+    )
+    batched_steps = {
+        int(state["step"].item())
+        for state in batched_trainer.optimizer.state.values()
+    }
+    assert batched_steps == {1}
 
 
 def test_problem_registry_tracks_only_replay_references():

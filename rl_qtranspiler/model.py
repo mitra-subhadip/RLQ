@@ -137,7 +137,8 @@ class GraphDQN(nn.Module):
             nn.Linear(256, 1),
         )
         self._hardware_tensor_cache: dict[
-            tuple[int, torch.device], tuple[torch.Tensor, torch.Tensor]
+            tuple[int, torch.device],
+            tuple[object, torch.Tensor, torch.Tensor],
         ] = {}
 
     @property
@@ -155,22 +156,27 @@ class GraphDQN(nn.Module):
         hardware = problem.hardware
         key = (id(hardware), self.device)
         cached = self._hardware_tensor_cache.get(key)
-        if cached is None:
+        if cached is None or cached[0] is not hardware:
             # Action selection runs under inference mode, but the same static
             # tensors are later consumed by gradient-tracked training passes.
+            # Retaining the hardware object also prevents its Python id from
+            # being reused for a different graph while this entry is cached.
             with torch.inference_mode(False):
                 cached = (
-                    self._tensor(
+                    hardware,
+                    torch.tensor(
                         hardware.directed_edge_index,
                         dtype=torch.long,
+                        device=self.device,
                     ),
-                    self._tensor(
+                    torch.tensor(
                         hardware.directed_edge_features,
                         dtype=torch.float32,
+                        device=self.device,
                     ),
                 )
             self._hardware_tensor_cache[key] = cached
-        return cached
+        return cached[1], cached[2]
 
     def forward(
         self,

@@ -116,3 +116,44 @@ def test_swapping_assigned_logical_identities_changes_observation():
             [problem, problem], [state_a, state_b]
         )
     assert not torch.allclose(values[0], values[1])
+
+
+def test_hardware_tensor_cache_validates_object_identity(monkeypatch):
+    import numpy as np
+
+    import rl_qtranspiler.model as model_module
+    from rl_qtranspiler.hardware import build_hardware_graph
+    from rl_qtranspiler.model import GraphDQN
+
+    first = build_hardware_graph(
+        "first",
+        3,
+        [(0, 1, 0.01), (1, 2, 0.02)],
+    )
+    second = build_hardware_graph(
+        "second",
+        3,
+        [(0, 1, 0.2), (1, 2, 0.3)],
+    )
+    monkeypatch.setattr(model_module, "id", lambda _: 1, raising=False)
+    model = GraphDQN(hidden_dim=8)
+
+    class Problem:
+        def __init__(self, hardware):
+            self.hardware = hardware
+
+    _, first_features = model._hardware_tensors(Problem(first))
+    _, second_features = model._hardware_tensors(Problem(second))
+
+    assert np.isclose(
+        float(first_features[0, 0]),
+        float(first.directed_edge_features[0, 0]),
+    )
+    assert np.isclose(
+        float(second_features[0, 0]),
+        float(second.directed_edge_features[0, 0]),
+    )
+    assert not np.isclose(
+        float(first_features[0, 0]),
+        float(second_features[0, 0]),
+    )

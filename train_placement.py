@@ -10,7 +10,11 @@ import networkx as nx
 import numpy as np
 import torch
 
-from rl_qtranspiler.curriculum import Curriculum, supervised_warm_start
+from rl_qtranspiler.curriculum import (
+    Curriculum,
+    expert_action_accuracy,
+    supervised_warm_start,
+)
 from rl_qtranspiler.generators import SUPPORTED_FAMILIES, generate_circuit
 from rl_qtranspiler.hardware import load_ibm_boston
 from rl_qtranspiler.model import GraphDQN
@@ -88,6 +92,23 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--warm-start-problems", type=int, default=3)
     parser.add_argument("--warm-start-epochs", type=int, default=5)
+    parser.add_argument(
+        "--warm-start-batch-size",
+        type=int,
+        default=128,
+        help=(
+            "Warm-start examples per optimizer update (default: 128)."
+        ),
+    )
+    parser.add_argument(
+        "--warm-start-updates",
+        type=int,
+        default=None,
+        help=(
+            "Total warm-start optimizer updates; by default preserve the "
+            "legacy epochs-times-examples budget."
+        ),
+    )
     parser.add_argument("--evaluation-interval", type=int, default=1000)
     parser.add_argument("--curriculum-patience", type=int, default=2)
     return parser.parse_args()
@@ -140,8 +161,25 @@ def main() -> None:
             trainer,
             exact_problems,
             epochs=arguments.warm_start_epochs,
+            batch_size=arguments.warm_start_batch_size,
+            updates=arguments.warm_start_updates,
         )
-        print(f"Warm-start loss: {losses[-1]:.6f}")
+        teacher_accuracy = expert_action_accuracy(
+            trainer,
+            exact_problems,
+            batch_size=arguments.warm_start_batch_size,
+        )
+        if losses:
+            print(
+                f"Warm-start loss: {losses[-1]:.6f} "
+                f"updates={len(losses)} "
+                f"teacher_accuracy={teacher_accuracy:.3f}"
+            )
+        else:
+            print(
+                "Warm start completed without optimizer updates; "
+                f"teacher_accuracy={teacher_accuracy:.3f}"
+            )
 
     while trainer.environment_steps < arguments.environment_steps:
         stage = curriculum.current

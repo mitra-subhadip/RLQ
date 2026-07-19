@@ -91,10 +91,21 @@ def supervised_warm_start(
     *,
     epochs: int = 10,
     batch_size: int = 128,
+    updates: int | None = None,
 ) -> list[float]:
-    """Pretrain action ranking from exact small-instance trajectories."""
+    """Pretrain action ranking from exact small-instance trajectories.
+
+    Unless ``updates`` is supplied, the optimizer-update budget matches the
+    original sequential implementation: ``epochs * number_of_examples``.
+    Batching and update count are independent so vectorization cannot silently
+    reduce the amount of optimization.
+    """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if epochs < 0:
+        raise ValueError("epochs must be nonnegative.")
+    if updates is not None and updates < 0:
+        raise ValueError("updates must be nonnegative.")
     examples: list[tuple[PlacementProblem, PlacementState, int]] = []
     for problem in problems:
         trainer.register_problem(problem)
@@ -103,38 +114,79 @@ def supervised_warm_start(
             for state, action in expert_trajectory(problem)
         )
 
-    epoch_losses: list[float] = []
+    update_count = epochs * len(examples) if updates is None else updates
+    if update_count and not examples:
+        raise ValueError("Warm-start updates require at least one example.")
+
+    update_losses: list[float] = []
     trainer.online.train()
-    for _ in range(epochs):
-        np.random.shuffle(examples)
-        total_loss = 0.0
-        for start in range(0, len(examples), batch_size):
-            batch = examples[start : start + batch_size]
-            q_values = trainer.online.forward_batch(
-                [problem for problem, _, _ in batch],
-                [state for _, state, _ in batch],
-            )
-            actions = torch.as_tensor(
-                [action for _, _, action in batch],
-                device=trainer.device,
-                dtype=torch.long,
-            )
-            loss = nn.functional.cross_entropy(
-                q_values,
-                actions,
-            )
-            trainer.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(
-                trainer.online.parameters(), trainer.config.gradient_clip
-            )
-            trainer.optimizer.step()
-            total_loss += float(loss.item()) * len(batch)
-        epoch_losses.append(total_loss / len(examples))
+    order = np.arange(len(examples))
+    cursor = len(order)
+    for _ in range(update_count):
+        if cursor >= len(order):
+            np.random.shuffle(order)
+            cursor = 0
+        stop = min(cursor + batch_size, len(order))
+        batch = [examples[int(index)] for index in order[cursor:stop]]
+        cursor = stop
+        q_values = trainer.online.forward_batch(
+            [problem for problem, _, _ in batch],
+            [state for _, state, _ in batch],
+        )
+        actions = torch.as_tensor(
+            [action for _, _, action in batch],
+            device=trainer.device,
+            dtype=torch.long,
+        )
+        loss = nn.functional.cross_entropy(q_values, actions)
+        trainer.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        nn.utils.clip_grad_norm_(
+            trainer.online.parameters(), trainer.config.gradient_clip
+        )
+        trainer.optimizer.step()
+        update_losses.append(float(loss.item()))
     trainer.target.load_state_dict(trainer.online.state_dict())
     for problem in problems:
         trainer.release_problem(problem.problem_id)
-    return epoch_losses
+    return update_losses
+
+
+@torch.inference_mode()
+def expert_action_accuracy(
+    trainer: DoubleDQNTrainer,
+    problems: list[PlacementProblem],
+    *,
+    batch_size: int = 128,
+) -> float:
+    """Measure top-one action accuracy on exact expert trajectories."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    examples = [
+        (problem, state, action)
+        for problem in problems
+        for state, action in expert_trajectory(problem)
+    ]
+    if not examples:
+        raise ValueError("Expert accuracy requires at least one example.")
+
+    was_training = trainer.online.training
+    trainer.online.eval()
+    correct = 0
+    for start in range(0, len(examples), batch_size):
+        batch = examples[start : start + batch_size]
+        q_values = trainer.online.forward_batch(
+            [problem for problem, _, _ in batch],
+            [state for _, state, _ in batch],
+        )
+        actions = torch.as_tensor(
+            [action for _, _, action in batch],
+            device=trainer.device,
+            dtype=torch.long,
+        )
+        correct += int((q_values.argmax(dim=1) == actions).sum().item())
+    trainer.online.train(was_training)
+    return correct / len(examples)
 
 
 @dataclass(frozen=True)

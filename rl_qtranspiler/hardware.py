@@ -144,4 +144,15 @@ def load_ibm_boston() -> HardwareGraph:
         NUM_QUBITS,
     )
 
-    return build_hardware_graph(BACKEND_NAME, NUM_QUBITS, COUPLING_DATA)
+    hardware = build_hardware_graph(BACKEND_NAME, NUM_QUBITS, COUPLING_DATA)
+    for values in (
+        hardware.edges,
+        hardware.cz_errors,
+        hardware.hop_distances,
+        hardware.calibration_distances,
+        hardware.static_node_features,
+        hardware.directed_edge_index,
+        hardware.directed_edge_features,
+    ):
+        values.setflags(write=False)
+    return hardware
