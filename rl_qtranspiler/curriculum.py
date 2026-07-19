@@ -61,7 +61,7 @@ def solve_exact(problem: PlacementProblem) -> ExactSolution:
             @ weights
             / max(hardware.max_calibration_distance, 1e-12)
         )
-        combined_scores = 0.9 * distance_scores + 0.1 * calibration_scores
+        combined_scores = 0.7 * distance_scores + 0.3 * calibration_scores
     else:
         combined_scores = np.zeros(assignment_count)
     best_index = int(np.argmin(combined_scores))
