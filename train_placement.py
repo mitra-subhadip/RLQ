@@ -12,6 +12,7 @@ import torch
 
 from rl_qtranspiler.curriculum import (
     Curriculum,
+    CurriculumStage,
     expert_action_accuracy,
     supervised_warm_start,
 )
@@ -75,6 +76,55 @@ def make_problem(
     )
 
 
+def validation_qubit_counts(
+    stage: CurriculumStage,
+    count: int = len(SUPPORTED_FAMILIES),
+) -> tuple[int, ...]:
+    """Return deterministic sizes spanning the complete curriculum stage."""
+    if count <= 0:
+        raise ValueError("Validation problem count must be positive.")
+    if count == 1:
+        return ((stage.minimum_qubits + stage.maximum_qubits) // 2,)
+    span = stage.maximum_qubits - stage.minimum_qubits
+    return tuple(
+        round(stage.minimum_qubits + span * index / (count - 1))
+        for index in range(count)
+    )
+
+
+def validation_set_matches_stage(
+    problems: list[PlacementProblem],
+    stage: CurriculumStage,
+) -> bool:
+    return tuple(
+        problem.num_logical_qubits for problem in problems
+    ) == validation_qubit_counts(stage)
+
+
+def make_validation_problems(
+    stage: CurriculumStage,
+    *,
+    hardware,
+    seed: int,
+) -> list[PlacementProblem]:
+    return [
+        make_problem(
+            num_qubits,
+            1_000_000 + index,
+            hardware=hardware,
+            family=family,
+            seed=seed,
+        )
+        for index, (num_qubits, family) in enumerate(
+            zip(
+                validation_qubit_counts(stage),
+                SUPPORTED_FAMILIES,
+                strict=True,
+            )
+        )
+    ]
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--environment-steps", type=int, default=50000)
@@ -134,6 +184,16 @@ def main() -> None:
             curriculum.load_state_dict(extra["curriculum"])
             curriculum.patience = arguments.curriculum_patience
         validation_problems = list(extra.get("validation_problems", []))
+        if not validation_set_matches_stage(
+            validation_problems, curriculum.current
+        ):
+            validation_problems.clear()
+            curriculum.reset_validation_tracking()
+            sizes = validation_qubit_counts(curriculum.current)
+            print(
+                "Reset incompatible validation set; "
+                f"stage={curriculum.current.name} sizes={sizes}"
+            )
         episode = int(extra.get("episode", 0))
         next_evaluation = int(
             extra.get(
@@ -196,18 +256,15 @@ def main() -> None:
 
         if trainer.environment_steps >= next_evaluation:
             if not validation_problems:
-                validation_problems = [
-                    make_problem(
-                        max(stage.minimum_qubits, 4),
-                        1_000_000 + index,
-                        hardware=hardware,
-                        family=SUPPORTED_FAMILIES[
-                            index % len(SUPPORTED_FAMILIES)
-                        ],
-                        seed=arguments.seed,
-                    )
-                    for index in range(6)
-                ]
+                validation_problems = make_validation_problems(
+                    stage,
+                    hardware=hardware,
+                    seed=arguments.seed,
+                )
+                print(
+                    f"Validation stage={stage.name} sizes="
+                    f"{validation_qubit_counts(stage)}"
+                )
             validation = -float(
                 np.mean(
                     [

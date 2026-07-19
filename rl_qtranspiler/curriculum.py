@@ -234,6 +234,11 @@ class Curriculum:
         self.stale_evaluations = 0
         return True
 
+    def reset_validation_tracking(self) -> None:
+        """Forget scores collected from a previous validation distribution."""
+        self.best_validation_score = float("inf")
+        self.stale_evaluations = 0
+
     def state_dict(self) -> dict[str, float | int]:
         return {
             "stage_index": self.stage_index,

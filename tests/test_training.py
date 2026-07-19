@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from qiskit import QuantumCircuit
 
@@ -14,6 +15,10 @@ from rl_qtranspiler.model import GraphDQN
 from rl_qtranspiler.preprocessing import preprocess_for_swap_routing
 from rl_qtranspiler.problem import build_placement_problem
 from rl_qtranspiler.trainer import DoubleDQNTrainer, TrainerConfig
+from train_placement import (
+    validation_qubit_counts,
+    validation_set_matches_stage,
+)
 
 
 def test_default_curriculum_advances_after_two_stale_evaluations():
@@ -23,6 +28,37 @@ def test_default_curriculum_advances_after_two_stale_evaluations():
     assert not curriculum.observe(0.1)
     assert curriculum.observe(0.1)
     assert curriculum.current.name == "medium"
+
+
+def test_validation_sizes_span_each_curriculum_stage():
+    curriculum = Curriculum()
+    expected = {
+        "small": (4, 5, 6, 6, 7, 8),
+        "medium": (9, 10, 12, 13, 15, 16),
+        "large": (17, 45, 73, 100, 128, 156),
+        "mixed": (4, 34, 65, 95, 126, 156),
+    }
+
+    for stage in curriculum.stages:
+        sizes = validation_qubit_counts(stage)
+        assert sizes == expected[stage.name]
+        assert sizes[0] == stage.minimum_qubits
+        assert sizes[-1] == stage.maximum_qubits
+        problems = [
+            SimpleNamespace(num_logical_qubits=size) for size in sizes
+        ]
+        assert validation_set_matches_stage(problems, stage)
+
+
+def test_reset_validation_tracking_for_new_distribution():
+    curriculum = Curriculum()
+    curriculum.observe(0.1)
+    curriculum.observe(0.2)
+
+    curriculum.reset_validation_tracking()
+
+    assert curriculum.best_validation_score == float("inf")
+    assert curriculum.stale_evaluations == 0
 
 
 def test_double_dqn_update_and_checkpoint(tmp_path: Path):
