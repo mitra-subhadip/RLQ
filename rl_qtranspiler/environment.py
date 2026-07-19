@@ -9,6 +9,10 @@ import numpy as np
 from .problem import PlacementProblem
 
 
+DEFAULT_DISTANCE_WEIGHT = 0.3
+DEFAULT_CALIBRATION_WEIGHT = 0.7
+
+
 @dataclass(frozen=True)
 class PlacementState:
     logical_to_physical: tuple[int, ...]
@@ -32,8 +36,8 @@ class PlacementEnvironment:
         self,
         problem: PlacementProblem,
         *,
-        distance_weight: float = 0.7,
-        calibration_weight: float = 0.3,
+        distance_weight: float = DEFAULT_DISTANCE_WEIGHT,
+        calibration_weight: float = DEFAULT_CALIBRATION_WEIGHT,
     ) -> None:
         if not np.isclose(distance_weight + calibration_weight, 1.0):
             raise ValueError("Reward weights must sum to one.")

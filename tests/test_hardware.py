@@ -2,7 +2,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from rl_qtranspiler.hardware import load_ibm_boston
+from rl_qtranspiler.hardware import build_hardware_graph, load_ibm_boston
 
 
 def test_boston_graph_and_distances():
@@ -22,16 +22,19 @@ def test_boston_graph_and_distances():
     )
 
 
-def test_calibration_cost_prefers_minimum_hop_paths():
-    hardware = load_ibm_boston()
-    for (left, right), error in zip(
-        hardware.edges, hardware.cz_errors, strict=True
-    ):
-        assert hardware.hop_distances[left, right] == 1
-        assert np.isclose(
-            hardware.calibration_distances[left, right],
-            -np.log1p(-error),
-        )
+def test_calibration_cost_can_prefer_a_longer_cleaner_path():
+    hardware = build_hardware_graph(
+        "fidelity-first",
+        3,
+        [(0, 1, 0.2), (0, 2, 0.01), (2, 1, 0.01)],
+    )
+
+    assert hardware.hop_distances[0, 1] == 1
+    assert np.isclose(
+        hardware.calibration_distances[0, 1],
+        2 * -np.log1p(-0.01),
+    )
+    assert hardware.calibration_distances[0, 1] < -np.log1p(-0.2)
 
 
 def test_cached_boston_arrays_are_immutable():

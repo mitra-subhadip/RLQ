@@ -44,6 +44,17 @@ The trainer uses prioritized replay, batched Double DQN updates, dueling action
 values, temporal interaction weights, bounded problem retention, and the
 staged curriculum described in the implementation plan.
 
+Training is fidelity-first. A calibration-heavy dense proxy supplies stepwise
+feedback, and routed episodes receive a terminal correction so their complete
+return equals the negative SABRE-routed log-infidelity per original two-qubit
+gate. Circuits of at most 16 qubits are routed every episode; larger circuits
+are routed every fifth episode by default. Set
+`--large-routed-reward-frequency 1` to route every episode or use
+`--disable-routed-reward` for proxy-only ablations. Validation always routes a
+fixed 18-circuit, size-by-family set and runs every 5,000 steps by default.
+Placement inference also selects its final beam candidate by routed fidelity;
+pass `--selection-metric proxy` for faster proxy-only selection.
+
 Generate ten random 50–60-qubit benchmark circuits with depths between 40 and
 100 using only RZ, SX, X, and CZ gates:
 
@@ -56,12 +67,16 @@ of qubits participating in CZ gates per layer (default: `0.25`), and
 `--format qasm2` when OpenQASM 2 output is preferred. The command prints a table
 containing each file's seed, size, exact depth, and gate counts.
 
-Resume a complete checkpoint—including replay, RNG, curriculum, and validation
-state—with:
+Resume a complete fidelity-reward checkpoint—including replay, RNG, and
+curriculum state—with:
 
 ```bash
 rlq-train --checkpoint placement_dqn.pt --resume
 ```
+
+Checkpoints created before the fidelity reward are intentionally rejected
+because their replay entries contain incompatible rewards. Start without
+`--resume` to replace an old checkpoint.
 
 The calibration snapshot is static. Refresh
 `ibm_boston_connectivity_snapshot.py` before experiments that require current

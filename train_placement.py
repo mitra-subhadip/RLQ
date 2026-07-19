@@ -21,7 +21,10 @@ from rl_qtranspiler.hardware import load_ibm_boston
 from rl_qtranspiler.model import GraphDQN
 from rl_qtranspiler.preprocessing import preprocess_for_swap_routing
 from rl_qtranspiler.problem import PlacementProblem, build_placement_problem
-from rl_qtranspiler.trainer import DoubleDQNTrainer
+from rl_qtranspiler.trainer import DoubleDQNTrainer, TrainerConfig
+
+
+VALIDATION_SIZES_PER_FAMILY = 3
 
 
 def connected_nodes(
@@ -78,7 +81,7 @@ def make_problem(
 
 def validation_qubit_counts(
     stage: CurriculumStage,
-    count: int = len(SUPPORTED_FAMILIES),
+    count: int = VALIDATION_SIZES_PER_FAMILY,
 ) -> tuple[int, ...]:
     """Return deterministic sizes spanning the complete curriculum stage."""
     if count <= 0:
@@ -96,9 +99,10 @@ def validation_set_matches_stage(
     problems: list[PlacementProblem],
     stage: CurriculumStage,
 ) -> bool:
+    expected = validation_qubit_counts(stage) * len(SUPPORTED_FAMILIES)
     return tuple(
         problem.num_logical_qubits for problem in problems
-    ) == validation_qubit_counts(stage)
+    ) == expected
 
 
 def make_validation_problems(
@@ -107,6 +111,11 @@ def make_validation_problems(
     hardware,
     seed: int,
 ) -> list[PlacementProblem]:
+    specifications = [
+        (num_qubits, family)
+        for family in SUPPORTED_FAMILIES
+        for num_qubits in validation_qubit_counts(stage)
+    ]
     return [
         make_problem(
             num_qubits,
@@ -115,19 +124,13 @@ def make_validation_problems(
             family=family,
             seed=seed,
         )
-        for index, (num_qubits, family) in enumerate(
-            zip(
-                validation_qubit_counts(stage),
-                SUPPORTED_FAMILIES,
-                strict=True,
-            )
-        )
+        for index, (num_qubits, family) in enumerate(specifications)
     ]
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--environment-steps", type=int, default=50000)
+    parser.add_argument("--environment-steps", type=int, default=250000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument(
         "--device",
@@ -159,8 +162,28 @@ def parse_arguments() -> argparse.Namespace:
             "legacy epochs-times-examples budget."
         ),
     )
-    parser.add_argument("--evaluation-interval", type=int, default=1000)
+    parser.add_argument("--evaluation-interval", type=int, default=5000)
     parser.add_argument("--curriculum-patience", type=int, default=5)
+    parser.add_argument(
+        "--large-routed-reward-frequency",
+        type=int,
+        default=5,
+        help=(
+            "Route every Nth training episode above 16 qubits; small and "
+            "medium episodes are always routed (default: 5)."
+        ),
+    )
+    parser.add_argument(
+        "--disable-routed-reward",
+        action="store_true",
+        help="Train only on the dense calibration-first proxy.",
+    )
+    parser.add_argument(
+        "--routing-optimization-level",
+        type=int,
+        choices=range(4),
+        default=1,
+    )
     return parser.parse_args()
 
 
@@ -170,7 +193,18 @@ def main() -> None:
     np.random.seed(arguments.seed)
     torch.manual_seed(arguments.seed)
     hardware = load_ibm_boston()
-    trainer = DoubleDQNTrainer(GraphDQN(), device=arguments.device)
+    trainer = DoubleDQNTrainer(
+        GraphDQN(),
+        config=TrainerConfig(
+            routed_reward_enabled=not arguments.disable_routed_reward,
+            large_routed_reward_frequency=(
+                arguments.large_routed_reward_frequency
+            ),
+            routing_seed=arguments.seed,
+            routing_optimization_level=arguments.routing_optimization_level,
+        ),
+        device=arguments.device,
+    )
     curriculum = Curriculum(patience=arguments.curriculum_patience)
     validation_problems: list[PlacementProblem] = []
     episode = 0
@@ -184,7 +218,7 @@ def main() -> None:
             curriculum.load_state_dict(extra["curriculum"])
             curriculum.patience = arguments.curriculum_patience
         validation_problems = list(extra.get("validation_problems", []))
-        if not validation_set_matches_stage(
+        if validation_problems and not validation_set_matches_stage(
             validation_problems, curriculum.current
         ):
             validation_problems.clear()
@@ -252,7 +286,8 @@ def main() -> None:
             family=family,
             seed=arguments.seed,
         )
-        reward = trainer.collect_episode(problem)
+        training_outcome = trainer.run_episode(problem)
+        reward = training_outcome.total_reward
 
         if trainer.environment_steps >= next_evaluation:
             if not validation_problems:
@@ -265,13 +300,50 @@ def main() -> None:
                     f"Validation stage={stage.name} sizes="
                     f"{validation_qubit_counts(stage)}"
                 )
+            validation_outcomes = [
+                trainer.run_episode(
+                    item,
+                    explore=False,
+                    optimize=False,
+                    routed_reward=True,
+                    routing_seed=arguments.seed,
+                )
+                for item in validation_problems
+            ]
+            routed_metrics = [
+                outcome.routed_metrics for outcome in validation_outcomes
+            ]
+            if any(metrics is None for metrics in routed_metrics):
+                raise RuntimeError("Routed validation did not produce metrics.")
             validation = -float(
                 np.mean(
+                    [outcome.total_reward for outcome in validation_outcomes]
+                )
+            )
+            mean_log_infidelity = float(
+                np.mean(
                     [
-                        trainer.collect_episode(
-                            item, explore=False, optimize=False
-                        )
-                        for item in validation_problems
+                        metrics.estimated_log_infidelity
+                        for metrics in routed_metrics
+                        if metrics is not None
+                    ]
+                )
+            )
+            mean_success = float(
+                np.mean(
+                    [
+                        metrics.estimated_success_probability
+                        for metrics in routed_metrics
+                        if metrics is not None
+                    ]
+                )
+            )
+            mean_swaps = float(
+                np.mean(
+                    [
+                        metrics.swap_count
+                        for metrics in routed_metrics
+                        if metrics is not None
                     ]
                 )
             )
@@ -282,17 +354,23 @@ def main() -> None:
             )
             if advanced:
                 validation_problems.clear()
+            reward_source = (
+                "routed" if training_outcome.routed_metrics else "proxy"
+            )
             print(
                 f"step={trainer.environment_steps} episode={episode} "
                 f"stage={curriculum.current.name} "
                 f"reward={reward:.5f} validation={validation:.5f} "
+                f"validation_log_infidelity={mean_log_infidelity:.5f} "
+                f"validation_success={mean_success:.5f} "
+                f"validation_swaps={mean_swaps:.1f} "
+                f"reward_source={reward_source} "
                 f"epsilon={trainer.epsilon:.3f} replay={len(trainer.replay)}"
             )
             trainer.save(
                 arguments.checkpoint,
                 extra_state={
                     "curriculum": curriculum.state_dict(),
-                    "validation_problems": validation_problems,
                     "episode": episode + 1,
                     "next_evaluation": (
                         next_evaluation + arguments.evaluation_interval
@@ -305,7 +383,6 @@ def main() -> None:
         arguments.checkpoint,
         extra_state={
             "curriculum": curriculum.state_dict(),
-            "validation_problems": validation_problems,
             "episode": episode,
             "next_evaluation": next_evaluation,
         },

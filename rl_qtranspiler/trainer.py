@@ -11,10 +11,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from .environment import PlacementEnvironment
+from .environment import PlacementEnvironment, PlacementScore
+from .evaluation import RoutedMetrics, evaluate_problem_mapping
 from .model import GraphDQN
 from .problem import PlacementProblem
 from .replay import PrioritizedReplayBuffer, Transition
+
+
+FIDELITY_REWARD_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,27 @@ class TrainerConfig:
     gamma: float = 1.0
     gradient_clip: float = 10.0
     training_frequency: int = 4
+    routed_reward_enabled: bool = True
+    large_circuit_threshold: int = 16
+    large_routed_reward_frequency: int = 5
+    routing_seed: int = 7
+    routing_optimization_level: int = 1
+
+    def __post_init__(self) -> None:
+        if self.large_circuit_threshold < 1:
+            raise ValueError("large_circuit_threshold must be positive.")
+        if self.large_routed_reward_frequency < 1:
+            raise ValueError(
+                "large_routed_reward_frequency must be positive."
+            )
+
+
+@dataclass(frozen=True)
+class EpisodeOutcome:
+    total_reward: float
+    proxy_score: PlacementScore
+    logical_to_physical: tuple[int, ...]
+    routed_metrics: RoutedMetrics | None
 
 
 class DoubleDQNTrainer:
@@ -66,6 +91,7 @@ class DoubleDQNTrainer:
         self._problem_ref_counts: dict[str, int] = {}
         self.environment_steps = 0
         self.optimization_steps = 0
+        self.training_episodes = 0
 
     def register_problem(self, problem: PlacementProblem) -> None:
         existing = self.problems.get(problem.problem_id)
@@ -127,19 +153,60 @@ class DoubleDQNTrainer:
             return int(random_module.choice(valid))
         return int(np.argmax(self.online.action_values(problem, state)))
 
-    def collect_episode(
+    def _should_route_training_episode(
+        self, problem: PlacementProblem
+    ) -> bool:
+        if not self.config.routed_reward_enabled:
+            return False
+        if problem.num_logical_qubits <= self.config.large_circuit_threshold:
+            return True
+        return (
+            self.training_episodes
+            % self.config.large_routed_reward_frequency
+            == 0
+        )
+
+    def run_episode(
         self,
         problem: PlacementProblem,
         *,
         explore: bool = True,
         optimize: bool = True,
-    ) -> float:
+        routed_reward: bool | None = None,
+        routing_seed: int | None = None,
+    ) -> EpisodeOutcome:
         environment = PlacementEnvironment(problem)
         state = environment.reset()
         total_reward = 0.0
+        routed_metrics: RoutedMetrics | None = None
+        use_routed_reward = (
+            self._should_route_training_episode(problem)
+            if routed_reward is None and explore
+            else bool(routed_reward)
+        )
         while not state.done:
             action = self.select_action(problem, state, explore=explore)
             next_state, reward, done, _ = environment.step(action)
+            if done and use_routed_reward:
+                selected_seed = (
+                    self.config.routing_seed + self.training_episodes
+                    if routing_seed is None and explore
+                    else self.config.routing_seed
+                    if routing_seed is None
+                    else routing_seed
+                )
+                routed_metrics = evaluate_problem_mapping(
+                    problem,
+                    next_state.logical_to_physical,
+                    seed=selected_seed,
+                    optimization_level=self.config.routing_optimization_level,
+                )
+                # Dense shaping sums to -proxy_score. This correction makes
+                # the complete return exactly -normalized routed infidelity.
+                reward += (
+                    environment.score.combined
+                    - routed_metrics.normalized_log_infidelity
+                )
             if explore:
                 transition = Transition(
                     problem.problem_id,
@@ -164,7 +231,27 @@ class DoubleDQNTrainer:
                     self.optimize_step()
             state = next_state
             total_reward += reward
-        return total_reward
+        if explore:
+            self.training_episodes += 1
+        return EpisodeOutcome(
+            total_reward,
+            environment.score,
+            state.logical_to_physical,
+            routed_metrics,
+        )
+
+    def collect_episode(
+        self,
+        problem: PlacementProblem,
+        *,
+        explore: bool = True,
+        optimize: bool = True,
+    ) -> float:
+        return self.run_episode(
+            problem,
+            explore=explore,
+            optimize=optimize,
+        ).total_reward
 
     def optimize_step(self) -> float:
         batch = self.replay.sample(
@@ -264,6 +351,8 @@ class DoubleDQNTrainer:
                 "config": asdict(self.config),
                 "environment_steps": self.environment_steps,
                 "optimization_steps": self.optimization_steps,
+                "training_episodes": self.training_episodes,
+                "reward_version": FIDELITY_REWARD_VERSION,
                 "replay": self.replay.state_dict(),
                 "problems": self.problems,
                 "problem_ref_counts": self._problem_ref_counts,
@@ -279,12 +368,19 @@ class DoubleDQNTrainer:
         checkpoint = torch.load(
             Path(path), map_location=self.device, weights_only=False
         )
+        reward_version = int(checkpoint.get("reward_version", 1))
+        if reward_version != FIDELITY_REWARD_VERSION:
+            raise ValueError(
+                "Checkpoint uses the old placement-proxy reward. Start "
+                "fidelity-first training without --resume."
+            )
         self.config = TrainerConfig(**checkpoint["config"])
         self.online.load_state_dict(checkpoint["model"])
         self.target.load_state_dict(checkpoint["target"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.environment_steps = checkpoint["environment_steps"]
         self.optimization_steps = checkpoint["optimization_steps"]
+        self.training_episodes = int(checkpoint.get("training_episodes", 0))
         self.replay = PrioritizedReplayBuffer(
             self.config.replay_capacity,
             alpha=self.config.priority_alpha,

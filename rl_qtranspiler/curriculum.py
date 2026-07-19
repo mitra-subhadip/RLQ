@@ -10,7 +10,12 @@ import numpy as np
 import torch
 from torch import nn
 
-from .environment import PlacementEnvironment, PlacementState
+from .environment import (
+    DEFAULT_CALIBRATION_WEIGHT,
+    DEFAULT_DISTANCE_WEIGHT,
+    PlacementEnvironment,
+    PlacementState,
+)
 from .problem import PlacementProblem
 from .trainer import DoubleDQNTrainer
 
@@ -61,7 +66,10 @@ def solve_exact(problem: PlacementProblem) -> ExactSolution:
             @ weights
             / max(hardware.max_calibration_distance, 1e-12)
         )
-        combined_scores = 0.7 * distance_scores + 0.3 * calibration_scores
+        combined_scores = (
+            DEFAULT_DISTANCE_WEIGHT * distance_scores
+            + DEFAULT_CALIBRATION_WEIGHT * calibration_scores
+        )
     else:
         combined_scores = np.zeros(assignment_count)
     best_index = int(np.argmin(combined_scores))
@@ -199,7 +207,7 @@ class CurriculumStage:
 class Curriculum:
     """Advance after validation fails to improve for a fixed patience."""
 
-    def __init__(self, patience: int = 2) -> None:
+    def __init__(self, patience: int = 5) -> None:
         if patience < 1:
             raise ValueError("patience must be positive.")
         self.stages = (

@@ -16,6 +16,8 @@ from .preprocessing import PreprocessingResult
 class PlacementProblem:
     problem_id: str
     hardware: HardwareGraph
+    routing_pairs: np.ndarray
+    original_two_qubit_gate_count: int
     num_logical_qubits: int
     interaction_weights: np.ndarray
     interaction_counts: np.ndarray
@@ -165,9 +167,22 @@ def build_placement_problem(
     if int(allowed.sum()) < num_logical:
         raise ValueError("Too few allowed physical qubits for this circuit.")
 
+    routing_pairs = np.asarray(
+        [
+            instruction.qargs
+            for instruction in result.instructions
+            if len(instruction.qargs) == 2
+            and isinstance(instruction.operation, Gate)
+            for _source_index in instruction.source_indices
+        ],
+        dtype=np.int16,
+    ).reshape(-1, 2)
+
     return PlacementProblem(
         problem_id=problem_id or result.original.name,
         hardware=hardware,
+        routing_pairs=routing_pairs,
+        original_two_qubit_gate_count=len(routing_pairs),
         num_logical_qubits=num_logical,
         interaction_weights=weights,
         interaction_counts=counts,

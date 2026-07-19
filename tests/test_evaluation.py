@@ -1,3 +1,4 @@
+import numpy as np
 from qiskit import qasm2
 
 from rl_qtranspiler.evaluation import evaluate_routed_circuit
@@ -24,3 +25,12 @@ def test_legacy_cu1_routes_on_undirected_boston_graph():
     )
     metrics = evaluate_routed_circuit(circuit, problem, (0, 1, 2))
     assert metrics.two_qubit_gate_count >= 2
+    assert problem.original_two_qubit_gate_count == 2
+    assert np.isclose(
+        metrics.normalized_log_infidelity,
+        metrics.estimated_log_infidelity / 2,
+    )
+    assert np.isclose(
+        metrics.estimated_success_probability,
+        np.exp(-metrics.estimated_log_infidelity),
+    )

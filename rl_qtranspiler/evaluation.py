@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import log1p
+from math import exp, log1p
 from time import perf_counter
 
 from qiskit import QuantumCircuit, transpile
@@ -27,6 +27,8 @@ class RoutedMetrics:
     two_qubit_gate_count: int
     depth: int
     estimated_log_infidelity: float
+    normalized_log_infidelity: float
+    estimated_success_probability: float
     runtime_seconds: float
 
 
@@ -95,5 +97,27 @@ def evaluate_routed_circuit(
         two_qubit_count,
         routed.depth(),
         log_infidelity,
+        log_infidelity / max(problem.original_two_qubit_gate_count, 1),
+        exp(-log_infidelity),
         elapsed,
+    )
+
+
+def evaluate_problem_mapping(
+    problem: PlacementProblem,
+    mapping: tuple[int, ...] | list[int],
+    *,
+    seed: int = 0,
+    optimization_level: int = 1,
+) -> RoutedMetrics:
+    """Rebuild and route the problem's compact two-qubit interaction stream."""
+    circuit = QuantumCircuit(problem.num_logical_qubits)
+    for left, right in problem.routing_pairs:
+        circuit.cz(int(left), int(right))
+    return evaluate_routed_circuit(
+        circuit,
+        problem,
+        mapping,
+        seed=seed,
+        optimization_level=optimization_level,
     )

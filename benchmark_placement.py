@@ -72,7 +72,7 @@ def main() -> None:
         model.load_state_dict(checkpoint["model"])
 
         def graph_dqn_mapping() -> tuple[int, ...]:
-            result = place(model, problem)
+            result = place(model, problem, routing_seed=arguments.seed)
             return tuple(
                 result.logical_to_physical[index]
                 for index in range(problem.num_logical_qubits)

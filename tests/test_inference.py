@@ -30,7 +30,12 @@ def test_beam_result_is_valid_and_not_worse_than_greedy():
     beam = place(model, problem, beam_width=4, expansions_per_state=3)
 
     assert len(set(beam.logical_to_physical.values())) == 4
-    assert beam.combined_score <= greedy.combined_score + 1e-12
+    assert beam.routed_normalized_log_infidelity is not None
+    assert greedy.routed_normalized_log_infidelity is not None
+    assert (
+        beam.routed_normalized_log_infidelity
+        <= greedy.routed_normalized_log_infidelity + 1e-12
+    )
     score = PlacementEnvironment(problem).score_mapping(
         tuple(beam.logical_to_physical[index] for index in range(4))
     )

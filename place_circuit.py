@@ -24,6 +24,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--beam-width", type=int, default=8)
     parser.add_argument("--expansions", type=int, default=4)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--selection-metric",
+        choices=("routed_fidelity", "proxy"),
+        default="routed_fidelity",
+    )
+    parser.add_argument("--routing-seed", type=int, default=0)
     return parser.parse_args()
 
 
@@ -50,6 +56,8 @@ def main() -> None:
         problem,
         beam_width=arguments.beam_width,
         expansions_per_state=arguments.expansions,
+        selection_metric=arguments.selection_metric,
+        routing_seed=arguments.routing_seed,
     )
     print(
         json.dumps(
@@ -60,6 +68,13 @@ def main() -> None:
                 "distance_score": result.distance_score,
                 "calibration_score": result.calibration_score,
                 "combined_score": result.combined_score,
+                "routed_log_infidelity": result.routed_log_infidelity,
+                "routed_normalized_log_infidelity": (
+                    result.routed_normalized_log_infidelity
+                ),
+                "estimated_success_probability": (
+                    result.estimated_success_probability
+                ),
                 "beam_width": result.beam_width,
                 "runtime_seconds": result.runtime_seconds,
             },

@@ -32,12 +32,12 @@ class HardwareGraph:
         return graph
 
 
-def _lexicographic_floyd_warshall(
+def _fidelity_first_floyd_warshall(
     num_nodes: int,
     edges: np.ndarray,
     errors: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Minimize hops first, then calibration cost among minimum-hop paths."""
+    """Compute independent minimum-hop and maximum-fidelity path costs."""
     hops = np.full((num_nodes, num_nodes), num_nodes + 1, dtype=np.int16)
     costs = np.full((num_nodes, num_nodes), inf, dtype=np.float64)
     np.fill_diagonal(hops, 0)
@@ -52,13 +52,8 @@ def _lexicographic_floyd_warshall(
         for source in range(num_nodes):
             candidate_hops = int(hops[source, middle]) + hops[middle]
             candidate_costs = costs[source, middle] + costs[middle]
-            shorter = candidate_hops < hops[source]
-            equal_but_cleaner = (candidate_hops == hops[source]) & (
-                candidate_costs < costs[source]
-            )
-            update = shorter | equal_but_cleaner
-            hops[source, update] = candidate_hops[update]
-            costs[source, update] = candidate_costs[update]
+            hops[source] = np.minimum(hops[source], candidate_hops)
+            costs[source] = np.minimum(costs[source], candidate_costs)
 
     if np.any(hops > num_nodes):
         raise ValueError("The hardware coupling graph must be connected.")
@@ -76,7 +71,7 @@ def build_hardware_graph(
     graph.add_nodes_from(range(num_qubits))
     graph.add_weighted_edges_from(coupling_data, weight="cz_error")
 
-    hops, calibration = _lexicographic_floyd_warshall(
+    hops, calibration = _fidelity_first_floyd_warshall(
         num_qubits, edges, errors
     )
     diameter = int(hops.max())
