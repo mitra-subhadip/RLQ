@@ -160,7 +160,7 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--evaluation-interval", type=int, default=1000)
-    parser.add_argument("--curriculum-patience", type=int, default=2)
+    parser.add_argument("--curriculum-patience", type=int, default=5)
     return parser.parse_args()
 
 
