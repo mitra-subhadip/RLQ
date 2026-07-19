@@ -34,6 +34,8 @@ Train with `train_placement.py`; place an OpenQASM circuit with
 `place_circuit.py`; compare identity, random, degree, greedy, SABRE
 basic/lookahead/decay, and Graph-DQN mappings with `benchmark_placement.py`.
 Installed wheels also provide `rlq-train`, `rlq-place`, and `rlq-benchmark`.
+Training automatically selects CUDA, then Apple MPS, then CPU; pass
+`--device cpu` (or another explicit PyTorch device) to override it.
 The trainer uses prioritized replay, batched Double DQN updates, dueling action
 values, temporal interaction weights, bounded problem retention, and the
 staged curriculum described in the implementation plan.

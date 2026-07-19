@@ -91,40 +91,76 @@ class PrioritizedReplayBuffer:
         if self.total_priority <= 0:
             raise RuntimeError("Replay priorities sum to zero.")
 
-        segment = self.total_priority / batch_size
-        leaves: list[int] = []
+        total_priority = self.total_priority
+        segment = total_priority / batch_size
+        values = (
+            np.arange(batch_size, dtype=np.float64)
+            + np.fromiter(
+                (random() for _ in range(batch_size)),
+                dtype=np.float64,
+                count=batch_size,
+            )
+        ) * segment
+        leaves = np.ones(batch_size, dtype=np.int64)
+        active = leaves < self.capacity
+        while np.any(active):
+            positions = np.flatnonzero(active)
+            left = 2 * leaves[positions]
+            choose_left = values[positions] <= self._tree[left]
+            values[positions] -= np.where(
+                choose_left, 0.0, self._tree[left]
+            )
+            leaves[positions] = left + (~choose_left)
+            active = leaves < self.capacity
+
         transitions: list[Transition] = []
-        probabilities: list[float] = []
-        for sample_index in range(batch_size):
-            value = (sample_index + random()) * segment
-            leaf = self._find_leaf(value)
-            data_index = leaf - self.capacity
-            transition = self._data[data_index]
+        for leaf in leaves:
+            transition = self._data[int(leaf) - self.capacity]
             if transition is None:
                 raise RuntimeError("Sampled an uninitialized replay entry.")
-            leaves.append(leaf)
             transitions.append(transition)
-            probabilities.append(self._tree[leaf] / self.total_priority)
 
-        probabilities_array = np.asarray(probabilities)
+        probabilities_array = self._tree[leaves] / total_priority
         weights = (self._size * probabilities_array) ** (-beta)
         weights /= weights.max()
         return ReplayBatch(
             tuple(transitions),
-            np.asarray(leaves, dtype=np.int64),
+            leaves,
             weights.astype(np.float32),
         )
 
     def update_priorities(
         self, tree_indices: np.ndarray, priorities: np.ndarray
     ) -> None:
-        for tree_index, priority in zip(
-            tree_indices, priorities, strict=True
-        ):
-            raw = float(abs(priority))
-            scaled = (raw + self.priority_epsilon) ** self.alpha
-            self._set_tree_priority(int(tree_index), scaled)
-            self._maximum_priority = max(self._maximum_priority, raw)
+        tree_indices = np.asarray(tree_indices, dtype=np.int64)
+        raw_priorities = np.abs(np.asarray(priorities, dtype=np.float64))
+        if tree_indices.shape != raw_priorities.shape:
+            raise ValueError("tree_indices and priorities must have equal shape.")
+        if tree_indices.size == 0:
+            return
+
+        # Sampling with replacement can return a leaf more than once. Match
+        # sequential update semantics by keeping its final supplied priority.
+        unique_reversed, reversed_positions = np.unique(
+            tree_indices[::-1], return_index=True
+        )
+        final_positions = tree_indices.size - 1 - reversed_positions
+        scaled = (
+            raw_priorities[final_positions] + self.priority_epsilon
+        ) ** self.alpha
+        self._tree[unique_reversed] = scaled
+
+        parents = np.unique(unique_reversed // 2)
+        parents = parents[parents > 0]
+        while parents.size:
+            self._tree[parents] = (
+                self._tree[2 * parents] + self._tree[2 * parents + 1]
+            )
+            parents = np.unique(parents // 2)
+            parents = parents[parents > 0]
+        self._maximum_priority = max(
+            self._maximum_priority, float(raw_priorities.max())
+        )
 
     def state_dict(self) -> dict[str, object]:
         return {

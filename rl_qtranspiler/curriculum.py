@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import permutations
+from itertools import chain, permutations
+from math import factorial
 
 import numpy as np
 import torch
@@ -31,22 +32,43 @@ def solve_exact(problem: PlacementProblem) -> ExactSolution:
             "per logical qubit."
         )
 
-    environment = PlacementEnvironment(problem)
-    best_mapping: tuple[int, ...] | None = None
-    best_score = float("inf")
-    for assignment in permutations(allowed):
-        mapping = [-1] * problem.num_logical_qubits
-        for logical, physical in zip(
-            problem.placement_order, assignment, strict=True
-        ):
-            mapping[logical] = physical
-        score = environment.score_mapping(mapping).combined
-        if score < best_score:
-            best_score = score
-            best_mapping = tuple(mapping)
-    if best_mapping is None:
-        raise RuntimeError("Exact solver did not evaluate any mappings.")
-    return ExactSolution(best_mapping, best_score)
+    num_logical = problem.num_logical_qubits
+    assignment_count = factorial(num_logical)
+    assignments = np.fromiter(
+        chain.from_iterable(permutations(allowed)),
+        dtype=np.int64,
+        count=assignment_count * num_logical,
+    ).reshape(assignment_count, num_logical)
+    mappings = np.empty_like(assignments)
+    mappings[:, np.asarray(problem.placement_order)] = assignments
+
+    left, right = problem.interaction_pairs
+    if left.size:
+        hardware = problem.hardware
+        weights = problem.normalized_pair_weights
+        physical_left = mappings[:, left]
+        physical_right = mappings[:, right]
+        distance_scores = (
+            np.maximum(
+                hardware.hop_distances[physical_left, physical_right] - 1,
+                0,
+            )
+            @ weights
+            / max(hardware.diameter - 1, 1)
+        )
+        calibration_scores = (
+            hardware.calibration_distances[physical_left, physical_right]
+            @ weights
+            / max(hardware.max_calibration_distance, 1e-12)
+        )
+        combined_scores = 0.9 * distance_scores + 0.1 * calibration_scores
+    else:
+        combined_scores = np.zeros(assignment_count)
+    best_index = int(np.argmin(combined_scores))
+    return ExactSolution(
+        tuple(int(value) for value in mappings[best_index]),
+        float(combined_scores[best_index]),
+    )
 
 
 def expert_trajectory(
@@ -68,8 +90,11 @@ def supervised_warm_start(
     problems: list[PlacementProblem],
     *,
     epochs: int = 10,
+    batch_size: int = 128,
 ) -> list[float]:
     """Pretrain action ranking from exact small-instance trajectories."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
     examples: list[tuple[PlacementProblem, PlacementState, int]] = []
     for problem in problems:
         trainer.register_problem(problem)
@@ -82,21 +107,30 @@ def supervised_warm_start(
     trainer.online.train()
     for _ in range(epochs):
         np.random.shuffle(examples)
-        losses: list[float] = []
-        for problem, state, action in examples:
-            q_values = trainer.online(problem, state)
-            loss = nn.functional.cross_entropy(
-                q_values.unsqueeze(0),
-                torch.tensor([action], device=trainer.device),
+        total_loss = 0.0
+        for start in range(0, len(examples), batch_size):
+            batch = examples[start : start + batch_size]
+            q_values = trainer.online.forward_batch(
+                [problem for problem, _, _ in batch],
+                [state for _, state, _ in batch],
             )
-            trainer.optimizer.zero_grad()
+            actions = torch.as_tensor(
+                [action for _, _, action in batch],
+                device=trainer.device,
+                dtype=torch.long,
+            )
+            loss = nn.functional.cross_entropy(
+                q_values,
+                actions,
+            )
+            trainer.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(
                 trainer.online.parameters(), trainer.config.gradient_clip
             )
             trainer.optimizer.step()
-            losses.append(float(loss.item()))
-        epoch_losses.append(float(np.mean(losses)))
+            total_loss += float(loss.item()) * len(batch)
+        epoch_losses.append(total_loss / len(examples))
     trainer.target.load_state_dict(trainer.online.state_dict())
     for problem in problems:
         trainer.release_problem(problem.problem_id)

@@ -75,7 +75,11 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--environment-steps", type=int, default=50000)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="PyTorch device (default: CUDA, then MPS, then CPU).",
+    )
     parser.add_argument("--checkpoint", type=Path, default=Path("placement_dqn.pt"))
     parser.add_argument(
         "--resume",

@@ -30,32 +30,42 @@ class EdgeAwareMessagePassing(nn.Module):
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
         edge_features: torch.Tensor,
+        destination_counts: torch.Tensor | None = None,
     ) -> torch.Tensor:
         projected = self.self_projection(node_features)
         if edge_index.shape[1] == 0:
             return torch.relu(self.normalization(projected))
 
         source, destination = edge_index
+        if node_features.ndim == 3:
+            edge_features = edge_features.unsqueeze(0).expand(
+                node_features.shape[0], -1, -1
+            )
         messages = self.message(
-            torch.cat([node_features[source], edge_features], dim=-1)
+            torch.cat(
+                [
+                    node_features[source]
+                    if node_features.ndim == 2
+                    else node_features[:, source],
+                    edge_features,
+                ],
+                dim=-1,
+            )
         )
         aggregated = torch.zeros_like(projected)
-        aggregated.index_add_(0, destination, messages)
-        counts = torch.zeros(
-            node_features.shape[0],
-            device=node_features.device,
-            dtype=node_features.dtype,
+        aggregation_dimension = 0 if node_features.ndim == 2 else 1
+        aggregated.index_add_(aggregation_dimension, destination, messages)
+        if destination_counts is None:
+            destination_counts = torch.bincount(
+                destination,
+                minlength=node_features.shape[-2],
+            ).to(dtype=node_features.dtype)
+        count_shape = (
+            (-1, 1) if node_features.ndim == 2 else (1, -1, 1)
         )
-        counts.index_add_(
-            0,
-            destination,
-            torch.ones(
-                destination.shape[0],
-                device=node_features.device,
-                dtype=node_features.dtype,
-            ),
+        aggregated = aggregated / destination_counts.clamp_min(1.0).reshape(
+            count_shape
         )
-        aggregated = aggregated / counts.clamp_min(1.0).unsqueeze(-1)
         return torch.relu(self.normalization(projected + aggregated))
 
 
@@ -81,8 +91,19 @@ class GraphEncoder(nn.Module):
         edge_features: torch.Tensor,
     ) -> torch.Tensor:
         encoded = node_features
+        destination_counts = None
+        if edge_index.shape[1]:
+            destination_counts = torch.bincount(
+                edge_index[1],
+                minlength=node_features.shape[-2],
+            ).to(device=node_features.device, dtype=node_features.dtype)
         for layer in self.layers:
-            encoded = layer(encoded, edge_index, edge_features)
+            encoded = layer(
+                encoded,
+                edge_index,
+                edge_features,
+                destination_counts,
+            )
         return encoded
 
 
@@ -115,6 +136,9 @@ class GraphDQN(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 1),
         )
+        self._hardware_tensor_cache: dict[
+            tuple[int, torch.device], tuple[torch.Tensor, torch.Tensor]
+        ] = {}
 
     @property
     def device(self) -> torch.device:
@@ -124,6 +148,29 @@ class GraphDQN(nn.Module):
         self, values: np.ndarray, *, dtype: torch.dtype
     ) -> torch.Tensor:
         return torch.as_tensor(values, dtype=dtype, device=self.device)
+
+    def _hardware_tensors(
+        self, problem: PlacementProblem
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hardware = problem.hardware
+        key = (id(hardware), self.device)
+        cached = self._hardware_tensor_cache.get(key)
+        if cached is None:
+            # Action selection runs under inference mode, but the same static
+            # tensors are later consumed by gradient-tracked training passes.
+            with torch.inference_mode(False):
+                cached = (
+                    self._tensor(
+                        hardware.directed_edge_index,
+                        dtype=torch.long,
+                    ),
+                    self._tensor(
+                        hardware.directed_edge_features,
+                        dtype=torch.float32,
+                    ),
+                )
+            self._hardware_tensor_cache[key] = cached
+        return cached
 
     def forward(
         self,
@@ -149,6 +196,24 @@ class GraphDQN(nn.Module):
             problem.hardware.num_qubits != num_physical for problem in problems
         ):
             raise ValueError("All batched hardware graphs must have equal size.")
+        first_hardware = problems[0].hardware
+        unique_hardware = {
+            id(problem.hardware): problem.hardware for problem in problems
+        }.values()
+        shared_hardware = all(
+            hardware is first_hardware
+            or (
+                np.array_equal(
+                    hardware.directed_edge_index,
+                    first_hardware.directed_edge_index,
+                )
+                and np.array_equal(
+                    hardware.directed_edge_features,
+                    first_hardware.directed_edge_features,
+                )
+            )
+            for hardware in unique_hardware
+        )
 
         physical_arrays: list[np.ndarray] = []
         logical_arrays: list[np.ndarray] = []
@@ -165,13 +230,14 @@ class GraphDQN(nn.Module):
             physical, logical = build_state_features(problem, state)
             physical_arrays.append(physical)
             logical_arrays.append(logical)
-            physical_edge_arrays.append(
-                problem.hardware.directed_edge_index
-                + batch_index * num_physical
-            )
-            physical_edge_features.append(
-                problem.hardware.directed_edge_features
-            )
+            if not shared_hardware:
+                physical_edge_arrays.append(
+                    problem.hardware.directed_edge_index
+                    + batch_index * num_physical
+                )
+                physical_edge_features.append(
+                    problem.hardware.directed_edge_features
+                )
             logical_offsets.append(logical_offset)
             logical_edge_arrays.append(
                 problem.logical_edge_index + logical_offset
@@ -180,17 +246,25 @@ class GraphDQN(nn.Module):
             logical_offset += problem.num_logical_qubits
 
         physical_x = self._tensor(
-            np.concatenate(physical_arrays), dtype=torch.float32
+            np.stack(physical_arrays)
+            if shared_hardware
+            else np.concatenate(physical_arrays),
+            dtype=torch.float32,
         )
         logical_x = self._tensor(
             np.concatenate(logical_arrays), dtype=torch.float32
         )
-        physical_edges = self._tensor(
-            np.concatenate(physical_edge_arrays, axis=1), dtype=torch.long
-        )
-        physical_edge_x = self._tensor(
-            np.concatenate(physical_edge_features), dtype=torch.float32
-        )
+        if shared_hardware:
+            physical_edges, physical_edge_x = self._hardware_tensors(problems[0])
+        else:
+            physical_edges = self._tensor(
+                np.concatenate(physical_edge_arrays, axis=1),
+                dtype=torch.long,
+            )
+            physical_edge_x = self._tensor(
+                np.concatenate(physical_edge_features),
+                dtype=torch.float32,
+            )
         logical_edges = self._tensor(
             np.concatenate(logical_edge_arrays, axis=1), dtype=torch.long
         )
@@ -202,12 +276,19 @@ class GraphDQN(nn.Module):
             logical_x, logical_edges, logical_edge_x
         )
         mapped_logical_embeddings = torch.zeros(
-            (batch_size * num_physical, self.hidden_dim),
+            (
+                (batch_size, num_physical, self.hidden_dim)
+                if shared_hardware
+                else (batch_size * num_physical, self.hidden_dim)
+            ),
             device=self.device,
             dtype=logical_embeddings.dtype,
         )
         current_embeddings: list[torch.Tensor] = []
         logical_pools: list[torch.Tensor] = []
+        mapped_batches: list[int] = []
+        mapped_physical: list[int] = []
+        mapped_sources: list[int] = []
         for batch_index, (problem, state, offset) in enumerate(
             zip(problems, states, logical_offsets, strict=True)
         ):
@@ -217,25 +298,31 @@ class GraphDQN(nn.Module):
             logical_pools.append(logical_slice.mean(dim=0))
             current = problem.placement_order[state.step_index]
             current_embeddings.append(logical_slice[current])
-            occupied_physical = [
-                physical
-                for physical, logical in enumerate(state.physical_to_logical)
-                if logical >= 0
-            ]
-            if occupied_physical:
-                logical_indices = [
-                    state.physical_to_logical[physical]
-                    for physical in occupied_physical
-                ]
-                destinations = self._tensor(
-                    np.asarray(occupied_physical)
-                    + batch_index * num_physical,
-                    dtype=torch.long,
+            physical_to_logical = np.asarray(state.physical_to_logical)
+            occupied_physical = np.flatnonzero(physical_to_logical >= 0)
+            mapped_batches.extend([batch_index] * occupied_physical.size)
+            mapped_physical.extend(occupied_physical.tolist())
+            mapped_sources.extend(
+                (physical_to_logical[occupied_physical] + offset).tolist()
+            )
+
+        if mapped_sources:
+            sources = self._tensor(np.asarray(mapped_sources), dtype=torch.long)
+            physical_indices = self._tensor(
+                np.asarray(mapped_physical), dtype=torch.long
+            )
+            if shared_hardware:
+                batch_indices = self._tensor(
+                    np.asarray(mapped_batches), dtype=torch.long
                 )
-                sources = self._tensor(
-                    np.asarray(logical_indices) + offset,
-                    dtype=torch.long,
+                mapped_logical_embeddings[
+                    batch_indices, physical_indices
+                ] = logical_embeddings[sources]
+            else:
+                batch_indices = self._tensor(
+                    np.asarray(mapped_batches), dtype=torch.long
                 )
+                destinations = batch_indices * num_physical + physical_indices
                 mapped_logical_embeddings[destinations] = logical_embeddings[
                     sources
                 ]
@@ -286,7 +373,7 @@ class GraphDQN(nn.Module):
         q_values = values[:, None] + advantages - mean_advantages[:, None]
         return q_values.masked_fill(~mask, torch.finfo(q_values.dtype).min)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def action_values(
         self,
         problem: PlacementProblem,

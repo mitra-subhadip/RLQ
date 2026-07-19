@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 from qiskit.circuit import Gate
@@ -26,6 +27,30 @@ class PlacementProblem:
     total_interaction_weight: float
     allowed_physical_mask: np.ndarray
 
+    @cached_property
+    def max_weighted_degree(self) -> float:
+        """Largest logical weighted degree, cached across episode states."""
+        return max(float(self.interaction_weights.sum(axis=1).max()), 1.0)
+
+    @cached_property
+    def allowed_physical_features(self) -> np.ndarray:
+        """Float representation used in every model observation."""
+        return self.allowed_physical_mask.astype(np.float32)
+
+    @cached_property
+    def interaction_pairs(self) -> tuple[np.ndarray, np.ndarray]:
+        """Upper-triangle logical pairs with nonzero interaction weight."""
+        return np.nonzero(np.triu(self.interaction_weights, k=1) > 0)
+
+    @cached_property
+    def normalized_pair_weights(self) -> np.ndarray:
+        """Normalized weights aligned with :attr:`interaction_pairs`."""
+        left, right = self.interaction_pairs
+        return (
+            self.interaction_weights[left, right]
+            / self.total_interaction_weight
+        )
+
     def valid_action_mask(self, physical_to_logical: tuple[int, ...]) -> np.ndarray:
         unoccupied = np.asarray(physical_to_logical) < 0
         return self.allowed_physical_mask & unoccupied
@@ -43,7 +68,7 @@ def build_placement_problem(
         raise ValueError("temporal_discount must be in (0, 1].")
     num_logical = result.original.num_qubits
     if num_logical > 156:
-        raise ValueError("Version one supports at most 30 logical qubits.")
+        raise ValueError("Version one supports at most 156 logical qubits.")
     if num_logical > hardware.num_qubits:
         raise ValueError("The circuit has more qubits than the hardware.")
 
@@ -73,12 +98,16 @@ def build_placement_problem(
             )
             + 1
         )
-        layers = np.arange(
-            first_layer,
-            first_layer + multiplicity,
-            dtype=np.int32,
-        )
-        contribution = float(np.power(temporal_discount, layers).sum())
+        if temporal_discount == 1.0:
+            contribution = float(multiplicity)
+        elif multiplicity == 1:
+            contribution = temporal_discount**first_layer
+        else:
+            contribution = (
+                temporal_discount**first_layer
+                * (1.0 - temporal_discount**multiplicity)
+                / (1.0 - temporal_discount)
+            )
         weights[left, right] += contribution
         weights[right, left] += contribution
         counts[left, right] += multiplicity
@@ -119,22 +148,14 @@ def build_placement_problem(
         ]
     ).astype(np.float32)
 
-    logical_edges: list[tuple[int, int]] = []
-    logical_edge_weights: list[float] = []
     max_edge_weight = max(float(weights.max()), 1.0)
-    for left in range(num_logical):
-        for right in range(num_logical):
-            if weights[left, right] > 0:
-                logical_edges.append((left, right))
-                logical_edge_weights.append(weights[left, right] / max_edge_weight)
-    edge_index = (
-        np.asarray(logical_edges, dtype=np.int64).T
-        if logical_edges
-        else np.empty((2, 0), dtype=np.int64)
+    edge_left, edge_right = np.nonzero(weights > 0)
+    edge_index = np.stack([edge_left, edge_right]).astype(
+        np.int64, copy=False
     )
-    edge_features = np.asarray(
-        logical_edge_weights, dtype=np.float32
-    ).reshape(-1, 1)
+    edge_features = (
+        weights[edge_left, edge_right] / max_edge_weight
+    ).astype(np.float32).reshape(-1, 1)
 
     allowed = np.zeros(hardware.num_qubits, dtype=bool)
     if allowed_physical_qubits is None:

@@ -44,6 +44,13 @@ class DoubleDQNTrainer:
         device: str | torch.device = "cpu",
     ) -> None:
         self.config = config or TrainerConfig()
+        if str(device) == "auto":
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
         self.device = torch.device(device)
         self.online = model.to(self.device)
         self.target = copy.deepcopy(model).to(self.device)
@@ -117,7 +124,7 @@ class DoubleDQNTrainer:
             problem.valid_action_mask(state.physical_to_logical)
         )
         if explore and random_module.random() < self.epsilon:
-            return int(random_module.choice(valid.tolist()))
+            return int(random_module.choice(valid))
         return int(np.argmax(self.online.action_values(problem, state)))
 
     def collect_episode(
@@ -168,16 +175,26 @@ class DoubleDQNTrainer:
             for transition in batch.transitions
         ]
         states = [transition.state for transition in batch.transitions]
-        actions = torch.as_tensor(
-            [transition.action for transition in batch.transitions],
+        actions = torch.from_numpy(
+            np.fromiter(
+                (transition.action for transition in batch.transitions),
+                dtype=np.int64,
+                count=len(batch.transitions),
+            )
+        ).to(
             device=self.device,
             dtype=torch.long,
         )
         self.online.train()
         q_values = self.online.forward_batch(problems, states)
         predictions = q_values.gather(1, actions[:, None]).squeeze(1)
-        targets = torch.as_tensor(
-            [transition.reward for transition in batch.transitions],
+        targets = torch.from_numpy(
+            np.fromiter(
+                (transition.reward for transition in batch.transitions),
+                dtype=np.float32,
+                count=len(batch.transitions),
+            )
+        ).to(
             device=self.device,
             dtype=torch.float32,
         )
@@ -219,7 +236,7 @@ class DoubleDQNTrainer:
         )
         loss = (element_losses * weights).mean()
 
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(
             self.online.parameters(), self.config.gradient_clip

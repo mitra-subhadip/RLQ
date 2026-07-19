@@ -17,7 +17,7 @@ class PlacementState:
 
     @property
     def done(self) -> bool:
-        return all(physical >= 0 for physical in self.logical_to_physical)
+        return self.step_index >= len(self.logical_to_physical)
 
 
 @dataclass(frozen=True)
@@ -79,41 +79,37 @@ class PlacementEnvironment:
         logical_qubit: int,
         physical_qubit: int,
     ) -> PlacementScore:
-        distance = 0.0
-        calibration = 0.0
         hardware = self.problem.hardware
         distance_denominator = max(hardware.diameter - 1, 1)
         calibration_denominator = max(
             hardware.max_calibration_distance, 1e-12
         )
 
-        for other_logical, other_physical in enumerate(
-            state.logical_to_physical
-        ):
-            if other_physical < 0:
-                continue
-            weight = self.problem.interaction_weights[
-                logical_qubit, other_logical
-            ]
-            if weight <= 0:
-                continue
-            normalized_weight = weight / self.problem.total_interaction_weight
-            hops = int(
-                hardware.hop_distances[physical_qubit, other_physical]
-            )
-            error_cost = float(
-                hardware.calibration_distances[
-                    physical_qubit, other_physical
-                ]
-            )
-            distance += normalized_weight * max(hops - 1, 0) / (
-                distance_denominator
-            )
-            calibration += (
-                normalized_weight
-                * error_cost
-                / calibration_denominator
-            )
+        logical_to_physical = np.asarray(state.logical_to_physical)
+        mapped_logical = np.flatnonzero(logical_to_physical >= 0)
+        weights = self.problem.interaction_weights[
+            logical_qubit, mapped_logical
+        ]
+        interacting = weights > 0
+        if not np.any(interacting):
+            return PlacementScore(0.0, 0.0, 0.0)
+
+        physical = logical_to_physical[mapped_logical[interacting]]
+        normalized_weights = (
+            weights[interacting] / self.problem.total_interaction_weight
+        )
+        hops = hardware.hop_distances[physical_qubit, physical]
+        calibration_costs = hardware.calibration_distances[
+            physical_qubit, physical
+        ]
+        distance = float(
+            normalized_weights @ np.maximum(hops - 1, 0)
+            / distance_denominator
+        )
+        calibration = float(
+            normalized_weights @ calibration_costs
+            / calibration_denominator
+        )
 
         combined = (
             self.distance_weight * distance
@@ -128,7 +124,10 @@ class PlacementEnvironment:
             raise RuntimeError("Cannot step a completed placement episode.")
         if not 0 <= action < self.problem.hardware.num_qubits:
             raise ValueError(f"Physical-qubit action {action} is out of range.")
-        if not self.valid_action_mask()[action]:
+        if (
+            not self.problem.allowed_physical_mask[action]
+            or self._state.physical_to_logical[action] >= 0
+        ):
             raise ValueError(f"Physical qubit {action} is not a valid action.")
 
         logical = self.current_logical_qubit()
@@ -164,17 +163,40 @@ class PlacementEnvironment:
     ) -> PlacementScore:
         if len(logical_to_physical) != self.problem.num_logical_qubits:
             raise ValueError("Mapping length does not match the circuit.")
-        if len(set(logical_to_physical)) != len(logical_to_physical):
+        mapping = np.asarray(logical_to_physical, dtype=np.int64)
+        if np.unique(mapping).size != mapping.size:
             raise ValueError("Mapping must be injective.")
+        hardware = self.problem.hardware
+        if (
+            np.any(mapping < 0)
+            or np.any(mapping >= hardware.num_qubits)
+            or not np.all(self.problem.allowed_physical_mask[mapping])
+        ):
+            raise ValueError("Mapping contains a disallowed physical qubit.")
 
-        replay = PlacementEnvironment(
-            self.problem,
-            distance_weight=self.distance_weight,
-            calibration_weight=self.calibration_weight,
+        left, right = self.problem.interaction_pairs
+        if left.size == 0:
+            return PlacementScore(0.0, 0.0, 0.0)
+        weights = self.problem.normalized_pair_weights
+        physical_left = mapping[left]
+        physical_right = mapping[right]
+        hops = hardware.hop_distances[physical_left, physical_right]
+        calibration_costs = hardware.calibration_distances[
+            physical_left, physical_right
+        ]
+        distance = float(
+            weights @ np.maximum(hops - 1, 0)
+            / max(hardware.diameter - 1, 1)
         )
-        for logical in self.problem.placement_order:
-            replay.step(int(logical_to_physical[logical]))
-        return replay.score
+        calibration = float(
+            weights @ calibration_costs
+            / max(hardware.max_calibration_distance, 1e-12)
+        )
+        combined = (
+            self.distance_weight * distance
+            + self.calibration_weight * calibration
+        )
+        return PlacementScore(distance, calibration, combined)
 
 
 def build_state_features(
@@ -184,75 +206,75 @@ def build_state_features(
     """Return dynamic physical and logical node features for the GNN."""
     hardware = problem.hardware
     physical_to_logical = np.asarray(state.physical_to_logical)
+    logical_to_physical = np.asarray(state.logical_to_physical)
     occupied = physical_to_logical >= 0
     current = (
         problem.placement_order[state.step_index]
         if state.step_index < problem.num_logical_qubits
         else -1
     )
-    weighted_degree = problem.interaction_weights.sum(axis=1)
-    max_degree = max(float(weighted_degree.max()), 1.0)
+    assigned_degree = np.zeros(hardware.num_qubits, dtype=np.float32)
+    current_affinity = np.zeros(hardware.num_qubits, dtype=np.float32)
+    assigned_physical = np.flatnonzero(occupied)
+    assigned_logical = physical_to_logical[assigned_physical]
+    assigned_degree[assigned_physical] = problem.logical_node_features[
+        assigned_logical, 0
+    ]
+    if current >= 0:
+        current_affinity[assigned_physical] = (
+            problem.interaction_weights[current, assigned_logical]
+            / problem.max_weighted_degree
+        )
 
-    assigned_degree = np.zeros(hardware.num_qubits)
-    current_affinity = np.zeros(hardware.num_qubits)
-    for physical, logical in enumerate(physical_to_logical):
-        if logical < 0:
-            continue
-        assigned_degree[physical] = weighted_degree[logical] / max_degree
-        if current >= 0:
-            current_affinity[physical] = (
-                problem.interaction_weights[current, logical] / max_degree
+    average_hop = np.zeros(hardware.num_qubits, dtype=np.float32)
+    average_calibration = np.zeros(hardware.num_qubits, dtype=np.float32)
+    related_count = np.zeros(hardware.num_qubits, dtype=np.float32)
+    if current >= 0:
+        mapped_logical = np.flatnonzero(logical_to_physical >= 0)
+        neighbor_weights = problem.interaction_weights[
+            current, mapped_logical
+        ]
+        interacting = neighbor_weights > 0
+        if np.any(interacting):
+            weights = neighbor_weights[interacting]
+            mapped_physical = logical_to_physical[
+                mapped_logical[interacting]
+            ]
+            denominator = float(weights.sum())
+            average_hop[:] = (
+                hardware.hop_distances[:, mapped_physical] @ weights
+                / denominator
+                / max(hardware.diameter, 1)
+            )
+            average_calibration[:] = (
+                hardware.calibration_distances[:, mapped_physical] @ weights
+                / denominator
+                / max(hardware.max_calibration_distance, 1e-12)
+            )
+            related_count.fill(
+                mapped_physical.size / max(problem.num_logical_qubits, 1)
             )
 
-    average_hop = np.zeros(hardware.num_qubits)
-    average_calibration = np.zeros(hardware.num_qubits)
-    related_count = np.zeros(hardware.num_qubits)
-    if current >= 0:
-        mapped_neighbors = [
-            (logical, physical)
-            for logical, physical in enumerate(state.logical_to_physical)
-            if physical >= 0 and problem.interaction_weights[current, logical] > 0
-        ]
-        denominator = sum(
-            problem.interaction_weights[current, logical]
-            for logical, _ in mapped_neighbors
-        )
-        if denominator > 0:
-            for candidate in range(hardware.num_qubits):
-                average_hop[candidate] = sum(
-                    problem.interaction_weights[current, logical]
-                    * hardware.hop_distances[candidate, physical]
-                    for logical, physical in mapped_neighbors
-                ) / denominator / max(hardware.diameter, 1)
-                average_calibration[candidate] = sum(
-                    problem.interaction_weights[current, logical]
-                    * hardware.calibration_distances[candidate, physical]
-                    for logical, physical in mapped_neighbors
-                ) / denominator / max(hardware.max_calibration_distance, 1e-12)
-                related_count[candidate] = len(mapped_neighbors) / max(
-                    problem.num_logical_qubits, 1
-                )
-
-    physical_dynamic = np.column_stack(
-        [
-            problem.allowed_physical_mask.astype(float),
-            occupied.astype(float),
-            assigned_degree,
-            current_affinity,
-            average_hop,
-            average_calibration,
-            related_count,
-        ]
-    ).astype(np.float32)
-    physical_features = np.concatenate(
-        [hardware.static_node_features, physical_dynamic], axis=1
+    physical_features = np.empty(
+        (hardware.num_qubits, hardware.static_node_features.shape[1] + 7),
+        dtype=np.float32,
     )
+    physical_features[:, :7] = hardware.static_node_features
+    physical_features[:, 7] = problem.allowed_physical_features
+    physical_features[:, 8] = occupied
+    physical_features[:, 9] = assigned_degree
+    physical_features[:, 10] = current_affinity
+    physical_features[:, 11] = average_hop
+    physical_features[:, 12] = average_calibration
+    physical_features[:, 13] = related_count
 
-    placed = (np.asarray(state.logical_to_physical) >= 0).astype(float)
-    current_flag = np.zeros(problem.num_logical_qubits)
+    logical_features = np.empty(
+        (problem.num_logical_qubits, problem.logical_node_features.shape[1] + 2),
+        dtype=np.float32,
+    )
+    logical_features[:, :3] = problem.logical_node_features
+    logical_features[:, 3] = logical_to_physical >= 0
+    logical_features[:, 4] = 0.0
     if current >= 0:
-        current_flag[current] = 1.0
-    logical_features = np.column_stack(
-        [problem.logical_node_features, placed, current_flag]
-    ).astype(np.float32)
+        logical_features[current, 4] = 1.0
     return physical_features, logical_features

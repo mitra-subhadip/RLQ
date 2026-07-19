@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from math import inf, log1p
 
 import networkx as nx
@@ -134,7 +135,9 @@ def build_hardware_graph(
     )
 
 
+@lru_cache(maxsize=1)
 def load_ibm_boston() -> HardwareGraph:
+    """Load the static calibration snapshot once per process."""
     from rl_qtranspiler.ibm_boston_connectivity_snapshot import (
         BACKEND_NAME,
         COUPLING_DATA,
