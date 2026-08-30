@@ -81,3 +81,6 @@ because their replay entries contain incompatible rewards. Start without
 The calibration snapshot is static. Refresh
 `ibm_boston_connectivity_snapshot.py` before experiments that require current
 hardware errors.
+
+Benchmark results are printed as aligned placement/proxy and routed-circuit
+tables. Pass `--format json` when machine-readable output is needed.

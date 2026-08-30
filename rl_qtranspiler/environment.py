@@ -9,8 +9,8 @@ import numpy as np
 from .problem import PlacementProblem
 
 
-DEFAULT_DISTANCE_WEIGHT = 0.3
-DEFAULT_CALIBRATION_WEIGHT = 0.7
+DEFAULT_DISTANCE_WEIGHT = 0.7
+DEFAULT_CALIBRATION_WEIGHT = 0.3
 
 
 @dataclass(frozen=True)
