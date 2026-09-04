@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rl-qtranspiler"
+version = "0.1.0"
+description = "Graph-DQN initial qubit placement for calibration-aware routing"
+requires-python = ">=3.11"
+dependencies = [
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "qiskit>=2.0,<3",
+    "torch>=2.2",
+    "qiskit-qasm3-import",
+]
+
+[project.scripts]
+rlq-train = "train_placement:main"
+rlq-place = "place_circuit:main"
+rlq-benchmark = "benchmark_placement:main"
+rlq-generate-random = "generate_random_circuits:main"
+
+[dependency-groups]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+py-modules = [
+    "train_placement",
+    "place_circuit",
+    "benchmark_placement",
+    "generate_random_circuits",
+]
+
+[tool.setuptools.packages.find]
+include = ["rl_qtranspiler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
